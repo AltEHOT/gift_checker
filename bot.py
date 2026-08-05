@@ -6,15 +6,16 @@ import sys
 import asyncio
 import threading
 from flask import Flask, request, jsonify
-from pyrogram import Client
+from telethon import TelegramClient, types
+from telethon.tl.functions.users import GetFullUserRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # ========== ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ==========
-API_ID = 30993809  # ЗАМЕНИТЕ на ваш api_id
-API_HASH = "9f8a6194865005795b237ab95b4b0559"  # ЗАМЕНИТЕ на ваш api_hash
-BOT_TOKEN = "8534024087:AAE0MAIsHKoWjPA4cuqSKOubAlm7F0_xpG0"  # ЗАМЕНИТЕ на токен бота
-PORT = 8080
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH")
+PORT = int(os.environ.get("PORT", 8080))
 
 if not BOT_TOKEN or not API_ID or not API_HASH:
     print("❌ ОШИБКА: Не все переменные окружения установлены!")
@@ -59,58 +60,80 @@ def shutdown_handler(signum, frame):
 signal.signal(signal.SIGINT, shutdown_handler)
 signal.signal(signal.SIGTERM, shutdown_handler)
 
-# ========== ФУНКЦИЯ ПРОВЕРКИ ПОДАРКОВ ЧЕРЕЗ PYROGRAM ==========
-def check_gifts_pyrogram_sync(username, api_id, api_hash):
+# ========== ФУНКЦИЯ ПРОВЕРКИ ПОДАРКОВ ЧЕРЕЗ TELETHON ==========
+async def check_gifts_telethon(username, api_id, api_hash):
     """
-    Синхронная проверка подарков через Pyrogram
+    Асинхронная проверка подарков через Telethon
     Возвращает: количество обычных подарков или None при ошибке
     """
     try:
-        # Создаем клиент Pyrogram
-        app = Client(
+        # Создаем клиент Telethon
+        client = TelegramClient(
             f"session_{username.replace('@', '')}",
-            api_id=api_id,
-            api_hash=api_hash,
-            in_memory=True
+            api_id,
+            api_hash,
+            system_version="4.16.30-vxCUSTOM"
         )
         
-        # Запускаем клиент
-        app.start()
+        # Подключаемся
+        await client.connect()
+        
+        # Проверяем авторизацию
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            print(f"❌ {username} - требуется авторизация")
+            return None
         
         try:
             # Получаем пользователя
-            user = app.get_users(username)
+            user = await client.get_entity(username)
             
-            # Получаем подарки
-            try:
-                gifts = app.get_gifts(user.id)
-            except Exception as e:
-                print(f"❌ Не удалось получить подарки для {username}: {e}")
-                gifts = []
+            # Получаем полную информацию о пользователе
+            full_user = await client(GetFullUserRequest(user.id))
             
-            # Считаем обычные (неулучшенные) подарки
+            # Пытаемся получить подарки
+            # В Telethon нет прямого метода get_gifts, но можно попробовать через full_user
             regular_gifts = 0
-            if gifts:
-                for gift in gifts:
+            
+            # Проверяем, есть ли поле gifts в full_user
+            if hasattr(full_user, 'gifts') and full_user.gifts:
+                for gift in full_user.gifts:
                     # Проверяем, улучшен ли подарок
                     is_upgraded = False
-                    if hasattr(gift, 'is_upgraded'):
-                        is_upgraded = gift.is_upgraded
-                    elif hasattr(gift, 'upgraded'):
+                    if hasattr(gift, 'upgraded'):
                         is_upgraded = gift.upgraded
-                    elif hasattr(gift, 'upgrade'):
-                        is_upgraded = gift.upgrade
+                    elif hasattr(gift, 'is_upgraded'):
+                        is_upgraded = gift.is_upgraded
                     
                     if not is_upgraded:
                         regular_gifts += 1
             
-            # Останавливаем клиент
-            app.stop()
+            # Если через GetFullUserRequest не получилось, пробуем альтернативный метод
+            if regular_gifts == 0:
+                # Пробуем получить через метод get_gifts (если есть в новой версии)
+                try:
+                    if hasattr(client, 'get_gifts'):
+                        gifts = await client.get_gifts(user.id)
+                        if gifts:
+                            for gift in gifts:
+                                is_upgraded = False
+                                if hasattr(gift, 'upgraded'):
+                                    is_upgraded = gift.upgraded
+                                elif hasattr(gift, 'is_upgraded'):
+                                    is_upgraded = gift.is_upgraded
+                                
+                                if not is_upgraded:
+                                    regular_gifts += 1
+                except:
+                    pass
+            
+            # Отключаемся
+            await client.disconnect()
             
             return regular_gifts
                 
         except Exception as e:
-            app.stop()
+            await client.disconnect()
             print(f"❌ Ошибка при проверке {username}: {e}")
             return None
             
@@ -124,7 +147,14 @@ def check_gifts_thread(username, api_id, api_hash):
     Запускает проверку в отдельном потоке для избежания конфликтов asyncio
     """
     try:
-        return check_gifts_pyrogram_sync(username, api_id, api_hash)
+        # Создаем новый event loop для этого потока
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(
+            check_gifts_telethon(username, api_id, api_hash)
+        )
+        loop.close()
+        return result
     except Exception as e:
         print(f"❌ Ошибка в потоке для {username}: {e}")
         return None
@@ -162,7 +192,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "🎁 Бот для проверки обычных подарков\n\n"
-        "Я проверяю аккаунты напрямую через Telegram API.\n\n"
+        "Я проверяю аккаунты напрямую через Telegram API (Telethon).\n\n"
         "📌 Как пользоваться:\n"
         "1. Нажмите 'Ввести список'\n"
         "2. Отправьте список юзернеймов\n"
@@ -262,7 +292,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username = account['username']
             user_total_gifts = account['total_gifts']
             
-            # Проверяем через Pyrogram
+            # Проверяем через Telethon
             regular_gifts = await check_gifts_async(username, API_ID, API_HASH)
             
             if regular_gifts is not None:
@@ -519,7 +549,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
     print("🤖 Бот запущен!")
-    print("📝 Проверка через Pyrogram (прямое API)")
+    print("📝 Проверка через Telethon (прямое API)")
     print(f"🌐 Веб-сервер доступен по адресу: https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost')}")
     
     try:
