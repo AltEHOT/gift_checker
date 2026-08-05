@@ -7,7 +7,6 @@ import asyncio
 import threading
 from flask import Flask, request, jsonify
 from pyrogram import Client
-from pyrogram.types import Gifts
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -85,7 +84,8 @@ def check_gifts_pyrogram_sync(username, api_id, api_hash):
             # Получаем подарки
             try:
                 gifts = app.get_gifts(user.id)
-            except:
+            except Exception as e:
+                print(f"❌ Не удалось получить подарки для {username}: {e}")
                 gifts = []
             
             # Считаем обычные (неулучшенные) подарки
