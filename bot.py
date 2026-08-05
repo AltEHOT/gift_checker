@@ -11,10 +11,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # ========== ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ==========
-BOT_TOKEN = "8534024087:AAE0MAIsHKoWjPA4cuqSKOubAlm7F0_xpG0"
-API_ID = 30993809
-API_HASH ="9f8a6194865005795b237ab95b4b0559"
-PORT = 8080
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH")
+PORT = int(os.environ.get("PORT", 8080))
 
 if not BOT_TOKEN or not API_ID or not API_HASH:
     print("❌ ОШИБКА: Не все переменные окружения установлены!")
@@ -59,8 +59,35 @@ def shutdown_handler(signum, frame):
 signal.signal(signal.SIGINT, shutdown_handler)
 signal.signal(signal.SIGTERM, shutdown_handler)
 
+# ========== ФУНКЦИЯ ДЛЯ БЕЗОПАСНОЙ ОТПРАВКИ СООБЩЕНИЙ ==========
+async def safe_send_message(update, text, parse_mode=None):
+    """Безопасная отправка сообщения с обработкой ошибок Markdown"""
+    try:
+        if parse_mode:
+            await update.message.reply_text(text, parse_mode=parse_mode)
+        else:
+            await update.message.reply_text(text)
+    except Exception as e:
+        # Если ошибка парсинга - отправляем без форматирования
+        await update.message.reply_text(text)
+
+async def safe_edit_message(query, text, parse_mode=None):
+    """Безопасное редактирование сообщения с обработкой ошибок Markdown"""
+    try:
+        if parse_mode:
+            await query.edit_message_text(text, parse_mode=parse_mode)
+        else:
+            await query.edit_message_text(text)
+    except Exception as e:
+        # Если ошибка парсинга - отправляем без форматирования
+        await query.edit_message_text(text)
+
 # ========== ФУНКЦИЯ ПРОВЕРКИ ПОДАРКОВ ==========
 async def check_gifts_through_bot(username, api_id, api_hash):
+    """
+    Проверяет количество обычных подарков у пользователя через @GiftBot
+    Возвращает: количество обычных подарков или None при ошибке
+    """
     try:
         client = TelegramClient(
             f"session_{username.replace('@', '')}",
@@ -73,13 +100,13 @@ async def check_gifts_through_bot(username, api_id, api_hash):
         
         if not await client.is_user_authorized():
             await client.disconnect()
-            return f"❌ {username} - требуется авторизация"
+            return None
         
         try:
             gift_bot = await client.get_entity("@GiftBot")
         except:
             await client.disconnect()
-            return f"❌ {username} - не найден @GiftBot"
+            return None
         
         await client.send_message(gift_bot, f"/gifts {username}")
         await asyncio.sleep(6)
@@ -97,14 +124,10 @@ async def check_gifts_through_bot(username, api_id, api_hash):
                 break
         
         await client.disconnect()
-        
-        if regular_gifts > 0:
-            return f"✅ {username} - {regular_gifts} обычных подарков"
-        else:
-            return None
+        return regular_gifts
                 
     except Exception as e:
-        return f"❌ {username} - ошибка: {str(e)[:50]}"
+        return None
 
 # ========== КОМАНДА /start ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -118,16 +141,55 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "🎁 **Бот для проверки обычных подарков**\n\n"
+        "🎁 Бот для проверки обычных подарков\n\n"
         "Я проверяю аккаунты через @GiftBot.\n\n"
-        "📌 **Как пользоваться:**\n"
+        "📌 Как пользоваться:\n"
         "1. Нажмите 'Ввести список'\n"
-        "2. Отправьте список юзернеймов\n"
+        "2. Отправьте список в формате:\n"
+        "@username - количество_всех_подарков\n"
+        "Например:\n"
+        "@sirkapirkaw - 1\n"
+        "@sofuuha - 2\n"
         "3. Нажмите 'Начать проверку'\n\n"
         "⏱ Проверка: ~3-5 сек на аккаунт",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
+        reply_markup=reply_markup
     )
+
+# ========== ФУНКЦИЯ ПАРСИНГА СПИСКА ==========
+def parse_accounts_with_gifts(text):
+    """
+    Парсит список аккаунтов в формате:
+    @username - число
+    Возвращает список словарей: [{"username": "sirkapirkaw", "total_gifts": 1}, ...]
+    """
+    accounts = []
+    
+    lines = text.strip().split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Ищем паттерн: @username - число или username - число
+        match = re.match(r'@?([a-zA-Z0-9_]{5,})\s*[-–—]\s*(\d+)', line)
+        if match:
+            username = match.group(1)
+            total_gifts = int(match.group(2))
+            accounts.append({
+                "username": username,
+                "total_gifts": total_gifts
+            })
+        else:
+            # Если формат не совпадает, пытаемся найти просто юзернейм
+            usernames = re.findall(r'@?([a-zA-Z0-9_]{5,})', line)
+            if usernames:
+                accounts.append({
+                    "username": usernames[0],
+                    "total_gifts": 0
+                })
+    
+    return accounts
 
 # ========== ОБРАБОТЧИК КНОПОК ==========
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -140,97 +202,128 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "enter_list":
         context.user_data['waiting_for_list'] = True
         await query.edit_message_text(
-            "📝 **Отправьте список аккаунтов**\n\n"
-            "Каждый юзернейм с новой строки.\n"
+            "📝 Отправьте список аккаунтов\n\n"
+            "Каждый аккаунт с новой строки в формате:\n"
+            "@username - количество_подарков\n\n"
             "Пример:\n"
-            "`@user1\n@user2\n@user3`\n\n"
-            "Нажмите /cancel чтобы отменить.",
-            parse_mode="Markdown"
+            "@sirkapirkaw - 1\n"
+            "@sofuuha - 2\n"
+            "@nuwxkdr - 1\n\n"
+            "Или просто юзернеймы (без количества).\n"
+            "Нажмите /cancel чтобы отменить."
         )
     
     elif action == "view_list":
         if user_id in user_lists and user_lists[user_id]:
-            accounts = "\n".join([f"@{u}" for u in user_lists[user_id]])
+            accounts_text = "\n".join([
+                f"@{acc['username']} - {acc['total_gifts']}" 
+                for acc in user_lists[user_id]
+            ])
             await query.edit_message_text(
-                f"📋 **Ваш список:**\n\n{accounts}\n\n"
-                f"Всего: {len(user_lists[user_id])} аккаунтов",
-                parse_mode="Markdown"
+                f"📋 Ваш список:\n\n{accounts_text}\n\n"
+                f"Всего: {len(user_lists[user_id])} аккаунтов"
             )
         else:
-            await query.edit_message_text(
-                "📭 **Список пуст**",
-                parse_mode="Markdown"
-            )
+            await query.edit_message_text("📭 Список пуст")
     
     elif action == "start_check":
         if user_id not in user_lists or not user_lists[user_id]:
             await query.edit_message_text(
-                "❌ **Список пуст!**\n\nДобавьте аккаунты.",
-                parse_mode="Markdown"
+                "❌ Список пуст!\n\nДобавьте аккаунты."
             )
             return
         
         await query.edit_message_text(
-            "🔍 **Начинаю проверку...**\n\n"
+            f"🔍 Начинаю проверку...\n\n"
             f"Проверяю {len(user_lists[user_id])} аккаунтов.\n"
-            "⏱ Это может занять несколько минут...",
-            parse_mode="Markdown"
+            "⏱ Это может занять несколько минут..."
         )
         
         results = []
         total = len(user_lists[user_id])
         
-        for i, username in enumerate(user_lists[user_id], 1):
-            try:
-                result = await check_gifts_through_bot(username, API_ID, API_HASH)
-                if result:
-                    results.append(result)
-            except Exception as e:
-                pass
+        for i, account in enumerate(user_lists[user_id], 1):
+            username = account['username']
+            user_total_gifts = account['total_gifts']
+            
+            regular_gifts = await check_gifts_through_bot(username, API_ID, API_HASH)
+            
+            if regular_gifts is not None:
+                if regular_gifts > 0:
+                    if user_total_gifts > 0:
+                        results.append(
+                            f"✅ @{username} - {regular_gifts} обычных (всего {user_total_gifts})"
+                        )
+                    else:
+                        results.append(f"✅ @{username} - {regular_gifts} обычных подарков")
+                else:
+                    results.append(f"ℹ️ @{username} - нет обычных подарков")
+            else:
+                results.append(f"❌ @{username} - ошибка проверки")
             
             if i % 3 == 0 or i == total:
                 try:
                     await query.edit_message_text(
-                        f"🔍 **Проверка...**\n\n"
+                        f"🔍 Проверка...\n\n"
                         f"✅ Проверено: {i}/{total}\n"
-                        f"🎁 Найдено: {len(results)}",
-                        parse_mode="Markdown"
+                        f"🎁 Найдено с обычными подарками: {len([r for r in results if '✅' in r])}"
                     )
                 except:
                     pass
         
+        # Формируем финальный отчет
         if results:
-            report = "🎁 **Аккаунты с обычными подарками:**\n\n"
-            report += "\n".join(results)
-            report += f"\n\n📊 **Найдено: {len(results)} из {total}**"
+            with_gifts = [r for r in results if '✅' in r]
+            without_gifts = [r for r in results if 'ℹ️' in r]
+            errors = [r for r in results if '❌' in r]
+            
+            report_parts = []
+            report_parts.append("🎁 Результаты проверки:\n")
+            
+            if with_gifts:
+                report_parts.append("\n✅ С обычными подарками:")
+                report_parts.extend(with_gifts)
+            
+            if without_gifts:
+                report_parts.append("\nℹ️ Без обычных подарков:")
+                report_parts.extend(without_gifts)
+            
+            if errors:
+                report_parts.append("\n❌ Ошибки:")
+                report_parts.extend(errors)
+            
+            report_parts.append(f"\n📊 Всего проверено: {total}")
+            
+            report = "\n".join(report_parts)
         else:
-            report = f"😕 **Не найдено аккаунтов с обычными подарками**\n\nПроверено: {total} аккаунтов"
+            report = "😕 Не удалось проверить аккаунты"
         
         if len(report) > 4000:
             for x in range(0, len(report), 4000):
                 await query.message.reply_text(report[x:x+4000])
         else:
-            await query.message.reply_text(report, parse_mode="Markdown")
+            await query.message.reply_text(report)
         
         await show_main_menu(query.message, user_id)
     
     elif action == "clear_list":
         if user_id in user_lists:
             del user_lists[user_id]
-        await query.edit_message_text(
-            "🗑 **Список очищен!**",
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text("🗑 Список очищен!")
         await show_main_menu(query.message, user_id)
     
     elif action == "help":
         await query.edit_message_text(
-            "❓ **Помощь**\n\n"
-            "🤖 Проверяет обычные подарки через @GiftBot\n"
-            "📝 Добавьте список аккаунтов\n"
-            "🚀 Нажмите 'Начать проверку'\n"
-            "⚠️ Использует ваш API ID и HASH",
-            parse_mode="Markdown"
+            "❓ Помощь\n\n"
+            "🤖 Что умеет этот бот?\n"
+            "Проверяет аккаунты на наличие обычных (неулучшенных) подарков.\n\n"
+            "📝 Формат ввода:\n"
+            "@username - количество_всех_подарков\n\n"
+            "Пример:\n"
+            "@sirkapirkaw - 1\n"
+            "@sofuuha - 2\n\n"
+            "🚀 После ввода нажмите 'Начать проверку'\n\n"
+            "⚠️ Использует ваш API ID и HASH"
         )
         await show_main_menu(query.message, user_id)
     
@@ -249,9 +342,8 @@ async def show_main_menu(message, user_id):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await message.reply_text(
-        "🏠 **Главное меню**\n\nВыберите действие:",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
+        "🏠 Главное меню\n\nВыберите действие:",
+        reply_markup=reply_markup
     )
 
 # ========== ОБРАБОТЧИК ТЕКСТА ==========
@@ -260,33 +352,43 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
     if context.user_data.get('waiting_for_list'):
-        usernames = re.findall(r'@?[a-zA-Z0-9_]{5,}', text)
-        usernames = [u.lstrip('@') for u in usernames]
-        usernames = list(dict.fromkeys(usernames))
+        parsed_accounts = parse_accounts_with_gifts(text)
         
-        if usernames:
+        if parsed_accounts:
             if user_id not in user_lists:
                 user_lists[user_id] = []
             
-            existing = set(user_lists[user_id])
-            new_accounts = [u for u in usernames if u not in existing]
+            existing_usernames = set([acc['username'] for acc in user_lists[user_id]])
+            new_accounts = [
+                acc for acc in parsed_accounts 
+                if acc['username'] not in existing_usernames
+            ]
             user_lists[user_id].extend(new_accounts)
             
             context.user_data['waiting_for_list'] = False
             
+            added_text = "\n".join([
+                f"@{acc['username']} - {acc['total_gifts']}" 
+                for acc in new_accounts[:10]
+            ])
+            
             await update.message.reply_text(
-                f"✅ **Добавлено {len(new_accounts)} аккаунтов!**\n\n"
-                f"Всего: {len(user_lists[user_id])} аккаунтов",
-                parse_mode="Markdown"
+                f"✅ Добавлено {len(new_accounts)} аккаунтов!\n\n"
+                f"Всего в списке: {len(user_lists[user_id])} аккаунтов\n\n"
+                f"Добавленные:\n{added_text}" +
+                (f"\n...и еще {len(new_accounts)-10}" if len(new_accounts) > 10 else "")
             )
             
             await show_main_menu(update.message, user_id)
         else:
             await update.message.reply_text(
-                "❌ **Не найдено юзернеймов**\n\n"
+                "❌ Не найдено аккаунтов в правильном формате\n\n"
                 "Отправьте список в формате:\n"
-                "`@user1\n@user2\n@user3`",
-                parse_mode="Markdown"
+                "@username - количество_подарков\n\n"
+                "Пример:\n"
+                "@sirkapirkaw - 1\n"
+                "@sofuuha - 2\n\n"
+                "Или просто отправьте /cancel чтобы отменить."
             )
     else:
         await show_main_menu(update.message, user_id)
@@ -300,11 +402,13 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in user_lists and user_lists[user_id]:
-        accounts = "\n".join([f"@{u}" for u in user_lists[user_id]])
+        accounts_text = "\n".join([
+            f"@{acc['username']} - {acc['total_gifts']}" 
+            for acc in user_lists[user_id]
+        ])
         await update.message.reply_text(
-            f"📋 **Ваш список:**\n\n{accounts}\n\n"
-            f"Всего: {len(user_lists[user_id])} аккаунтов",
-            parse_mode="Markdown"
+            f"📋 Ваш список:\n\n{accounts_text}\n\n"
+            f"Всего: {len(user_lists[user_id])} аккаунтов"
         )
     else:
         await update.message.reply_text("📭 Список пуст")
@@ -322,42 +426,71 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     results = []
     total = len(user_lists[user_id])
     
-    for i, username in enumerate(user_lists[user_id], 1):
-        try:
-            result = await check_gifts_through_bot(username, API_ID, API_HASH)
-            if result:
-                results.append(result)
-        except:
-            pass
+    for i, account in enumerate(user_lists[user_id], 1):
+        username = account['username']
+        user_total_gifts = account['total_gifts']
+        
+        regular_gifts = await check_gifts_through_bot(username, API_ID, API_HASH)
+        
+        if regular_gifts is not None:
+            if regular_gifts > 0:
+                if user_total_gifts > 0:
+                    results.append(
+                        f"✅ @{username} - {regular_gifts} обычных (всего {user_total_gifts})"
+                    )
+                else:
+                    results.append(f"✅ @{username} - {regular_gifts} обычных")
+            else:
+                results.append(f"ℹ️ @{username} - нет обычных подарков")
+        else:
+            results.append(f"❌ @{username} - ошибка проверки")
         
         if i % 3 == 0 or i == total:
             try:
                 await update.message.reply_text(
-                    f"⏳ Прогресс: {i}/{total}\nНайдено: {len(results)}"
+                    f"⏳ Прогресс: {i}/{total}\n"
+                    f"Найдено: {len([r for r in results if '✅' in r])}"
                 )
             except:
                 pass
     
     if results:
-        report = "🎁 **Аккаунты с обычными подарками:**\n\n"
-        report += "\n".join(results)
-        report += f"\n\n📊 Найдено: {len(results)} из {total}"
+        with_gifts = [r for r in results if '✅' in r]
+        without_gifts = [r for r in results if 'ℹ️' in r]
+        errors = [r for r in results if '❌' in r]
+        
+        report_parts = []
+        report_parts.append("🎁 Результаты проверки:\n")
+        
+        if with_gifts:
+            report_parts.append("\n✅ С обычными подарками:")
+            report_parts.extend(with_gifts)
+        
+        if without_gifts:
+            report_parts.append("\nℹ️ Без обычных подарков:")
+            report_parts.extend(without_gifts)
+        
+        if errors:
+            report_parts.append("\n❌ Ошибки:")
+            report_parts.extend(errors)
+        
+        report_parts.append(f"\n📊 Всего проверено: {total}")
+        
+        report = "\n".join(report_parts)
     else:
-        report = f"😕 Не найдено аккаунтов с обычными подарками\n\nПроверено: {total}"
+        report = "😕 Не удалось проверить аккаунты"
     
-    await update.message.reply_text(report, parse_mode="Markdown")
+    await update.message.reply_text(report)
 
-# ========== ЗАПУСК БОТА И ВЕБ-СЕРВЕРА ==========
+# ========== ЗАПУСК ==========
 def main():
     # Запускаем веб-сервер в отдельном потоке
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
     print("🌐 Веб-сервер запущен в фоновом потоке")
     
-    # Даем время веб-серверу запуститься
     time.sleep(2)
     
-    # Запускаем Telegram бота
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
