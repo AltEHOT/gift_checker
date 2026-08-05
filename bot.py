@@ -19,29 +19,39 @@ async def check_gifts_through_bot(username, api_id, api_hash):
     Отправляет запрос боту и парсит ответ
     """
     try:
-        # Создаем клиент Telethon
+        # Создаем клиент Telethon (без cryptg)
         client = TelegramClient(
             f"session_{username.replace('@', '')}",
             api_id,
             api_hash,
-            system_version="4.16.30-vxCUSTOM"
+            system_version="4.16.30-vxCUSTOM",
+            device_model="iPhone 15 Pro Max",
+            app_version="10.3.0"
         )
         
         # Подключаемся
         await client.connect()
         
+        # Проверяем авторизацию
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return f"❌ {username} - требуется авторизация API"
+        
         # Получаем GiftBot
-        gift_bot = await client.get_entity("@GiftBot")
+        try:
+            gift_bot = await client.get_entity("@GiftBot")
+        except:
+            await client.disconnect()
+            return f"❌ {username} - не найден @GiftBot"
         
         # Отправляем запрос на проверку подарков
         await client.send_message(gift_bot, f"/gifts {username}")
         
         # Ждем ответ (боту нужно время на обработку)
-        await asyncio.sleep(5)
+        await asyncio.sleep(6)
         
-        # Получаем последнее сообщение от GiftBot
+        # Получаем последние сообщения от GiftBot
         regular_gifts = 0
-        total_gifts = 0
         
         async for message in client.iter_messages(gift_bot, limit=5):
             if message.text and username in message.text:
@@ -54,12 +64,10 @@ async def check_gifts_through_bot(username, api_id, api_hash):
                 if numbers:
                     # Если есть 2 числа - второе это обычные подарки
                     if len(numbers) >= 2:
-                        total_gifts = int(numbers[0]) if numbers[0] else 0
                         regular_gifts = int(numbers[1]) if len(numbers) > 1 else 0
                     else:
                         # Если одно число - это общее количество
-                        total_gifts = int(numbers[0])
-                        regular_gifts = total_gifts
+                        regular_gifts = int(numbers[0])
                 
                 break
         
@@ -69,9 +77,6 @@ async def check_gifts_through_bot(username, api_id, api_hash):
         # Возвращаем результат только если есть обычные подарки
         if regular_gifts > 0:
             return f"✅ {username} - {regular_gifts} обычных подарков"
-        elif total_gifts > 0:
-            # Если есть только улучшенные подарки
-            return None  # Пропускаем, так как нужны только обычные
         else:
             return None
                 
