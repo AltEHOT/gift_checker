@@ -12,25 +12,21 @@ BOT_TOKEN = "ваш_токен_бота_от_BotFather"  # ЗАМЕНИТЕ на
 # Хранилище списков пользователей
 user_lists = {}
 
-# Функция проверки ТОЛЬКО неулучшенных подарков
+# ========== ОСНОВНАЯ ФУНКЦИЯ ПРОВЕРКИ (АСИНХРОННАЯ) ==========
 async def check_regular_gifts(username, api_id, api_hash):
+    """Асинхронная функция проверки обычных подарков у одного аккаунта"""
     try:
-        # Используем новый способ создания клиента с правильным event loop
-        loop = asyncio.get_event_loop()
-        
         app = Client(
             "temp_session",
             api_id=api_id,
             api_hash=api_hash,
             in_memory=True,
-            workdir="."  # Добавляем рабочую директорию
+            workdir="."
         )
         
-        # Запускаем клиент и проверяем
         async with app:
             user = await app.get_users(username)
             
-            # Получаем подарки пользователя
             try:
                 gifts = await app.get_gifts(user.id)
             except:
@@ -39,7 +35,6 @@ async def check_regular_gifts(username, api_id, api_hash):
             regular_gifts = 0
             if gifts:
                 for gift in gifts:
-                    # Проверяем, улучшен ли подарок
                     is_upgraded = False
                     if hasattr(gift, 'is_upgraded'):
                         is_upgraded = gift.is_upgraded
@@ -59,16 +54,43 @@ async def check_regular_gifts(username, api_id, api_hash):
     except Exception as e:
         return f"❌ {username} - ошибка: {str(e)[:50]}"
 
-# Функция для проверки в отдельном event loop
-async def check_all_accounts(accounts):
+# ========== НОВАЯ ФУНКЦИЯ ДЛЯ ЗАПУСКА ПРОВЕРКИ В ОТДЕЛЬНОМ LOOP ==========
+def run_check(username, api_id, api_hash):
+    """
+    Синхронная обертка для запуска асинхронной проверки.
+    Создает отдельный event loop для каждого вызова.
+    """
+    try:
+        # Создаем новый event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Запускаем асинхронную функцию в этом loop
+        result = loop.run_until_complete(
+            check_regular_gifts(username, api_id, api_hash)
+        )
+        
+        loop.close()
+        return result
+        
+    except Exception as e:
+        return f"❌ {username} - ошибка при запуске: {str(e)[:50]}"
+
+# ========== ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ВСЕХ АККАУНТОВ ==========
+def check_all_accounts(accounts, api_id, api_hash):
+    """Проверяет все аккаунты из списка, используя run_check"""
     results = []
+    total = len(accounts)
+    
     for i, username in enumerate(accounts, 1):
-        result = await check_regular_gifts(username, API_ID, API_HASH)
+        # Используем run_check вместо прямого вызова async функции
+        result = run_check(username, api_id, api_hash)
         if result:
             results.append(result)
+    
     return results
 
-# Команда /start
+# ========== КОМАНДА /start ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -93,7 +115,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# Обработчик кнопок
+# ========== ОБРАБОТЧИК КНОПОК ==========
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -144,22 +166,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         
-        # Проверяем аккаунты
+        # ========== ИСПОЛЬЗУЕМ run_check ДЛЯ ПРОВЕРКИ ==========
         results = []
         total = len(user_lists[user_id])
         
-        # Создаем отдельный event loop для pyrogram
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
         for i, username in enumerate(user_lists[user_id], 1):
-            try:
-                # Запускаем проверку с правильным event loop
-                result = await check_regular_gifts(username, API_ID, API_HASH)
-                if result:
-                    results.append(result)
-            except Exception as e:
-                pass
+            # Вызываем run_check (синхронная функция)
+            result = run_check(username, API_ID, API_HASH)
+            if result:
+                results.append(result)
             
             # Обновляем прогресс каждые 5 аккаунтов
             if i % 5 == 0 or i == total:
@@ -172,8 +187,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except:
                     pass
-        
-        loop.close()
         
         # Формируем финальный отчет
         if results:
@@ -223,7 +236,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "main_menu":
         await show_main_menu(query.message, user_id)
 
-# Показать главное меню
+# ========== ПОКАЗАТЬ ГЛАВНОЕ МЕНЮ ==========
 async def show_main_menu(message, user_id):
     keyboard = [
         [InlineKeyboardButton("📝 Ввести список аккаунтов", callback_data="enter_list")],
@@ -241,28 +254,20 @@ async def show_main_menu(message, user_id):
         parse_mode="Markdown"
     )
 
-# Обработчик текстовых сообщений (для ввода списка)
+# ========== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ==========
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
     
-    # Если пользователь в режиме ввода списка
     if context.user_data.get('waiting_for_list'):
-        # Парсим юзернеймы из текста
         usernames = re.findall(r'@?[a-zA-Z0-9_]{5,}', text)
-        
-        # Очищаем от @ в начале
         usernames = [u.lstrip('@') for u in usernames]
-        
-        # Убираем дубликаты
         usernames = list(dict.fromkeys(usernames))
         
         if usernames:
-            # Сохраняем в список пользователя
             if user_id not in user_lists:
                 user_lists[user_id] = []
             
-            # Добавляем новые аккаунты (без дубликатов внутри списка)
             existing = set(user_lists[user_id])
             new_accounts = [u for u in usernames if u not in existing]
             user_lists[user_id].extend(new_accounts)
@@ -277,7 +282,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             
-            # Показываем главное меню
             await show_main_menu(update.message, user_id)
         else:
             await update.message.reply_text(
@@ -288,10 +292,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
     else:
-        # Если не в режиме ввода - показываем меню
         await show_main_menu(update.message, user_id)
 
-# Команда /cancel - отмена ввода списка
+# ========== КОМАНДА /cancel ==========
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['waiting_for_list'] = False
     await update.message.reply_text(
@@ -300,7 +303,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await show_main_menu(update.message, update.effective_user.id)
 
-# Команда /list - показать список
+# ========== КОМАНДА /list ==========
 async def show_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in user_lists and user_lists[user_id]:
@@ -313,7 +316,7 @@ async def show_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("📭 Список пуст")
 
-# Команда /check - начать проверку
+# ========== КОМАНДА /check ==========
 async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in user_lists or not user_lists[user_id]:
@@ -329,21 +332,14 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode="Markdown"
     )
     
-    # Проверяем аккаунты (аналогично кнопке)
     results = []
     total = len(user_lists[user_id])
     
-    # Создаем отдельный event loop для pyrogram
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
     for i, username in enumerate(user_lists[user_id], 1):
-        try:
-            result = await check_regular_gifts(username, API_ID, API_HASH)
-            if result:
-                results.append(result)
-        except Exception as e:
-            pass
+        # ========== ИСПОЛЬЗУЕМ run_check ДЛЯ ПРОВЕРКИ ==========
+        result = run_check(username, API_ID, API_HASH)
+        if result:
+            results.append(result)
         
         if i % 5 == 0 or i == total:
             try:
@@ -355,8 +351,6 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             except:
                 pass
     
-    loop.close()
-    
     if results:
         report = "🎁 **Аккаунты с обычными подарками:**\n\n"
         report += "\n".join(results)
@@ -366,27 +360,21 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     await update.message.reply_text(report, parse_mode="Markdown")
 
-# Запуск бота
+# ========== ЗАПУСК БОТА ==========
 def main():
-    # Создаем приложение
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("list", show_list))
     app.add_handler(CommandHandler("check", start_check_command))
     
-    # Обработчики
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
     print("🤖 Бот запущен и готов к работе!")
     print("📝 Пользователи могут вводить свои списки аккаунтов")
     
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    main()
     app.run_polling()
 
 if __name__ == "__main__":
