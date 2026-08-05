@@ -7,7 +7,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 # ВАШИ ДАННЫЕ (получите их на my.telegram.org)
 API_ID = 30993809  # ЗАМЕНИТЕ на ваш api_id
 API_HASH = "9f8a6194865005795b237ab95b4b0559"  # ЗАМЕНИТЕ на ваш api_hash
-BOT_TOKEN = "telegram.error.InvalidToken: The token `ваш_токен_бота_от_BotFather` was rejected by the server."  # ЗАМЕНИТЕ на токен бота
+BOT_TOKEN = "8534024087:AAE0MAIsHKoWjPA4cuqSKOubAlm7F0_xpG0"  # ЗАМЕНИТЕ на токен бота
 
 # Хранилище списков пользователей
 user_lists = {}
