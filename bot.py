@@ -1,7 +1,5 @@
-import asyncio
 import re
-import concurrent.futures
-import threading
+import time
 from pyrogram import Client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -14,10 +12,14 @@ BOT_TOKEN = "ваш_токен_бота_от_BotFather"  # ЗАМЕНИТЕ на
 # Хранилище списков пользователей
 user_lists = {}
 
-# ========== ОСНОВНАЯ ФУНКЦИЯ ПРОВЕРКИ (АСИНХРОННАЯ) ==========
-async def check_regular_gifts_async(username, api_id, api_hash):
-    """Асинхронная функция проверки обычных подарков у одного аккаунта"""
+# ========== СИНХРОННАЯ ФУНКЦИЯ ПРОВЕРКИ ПОДАРКОВ ==========
+def check_regular_gifts_sync(username, api_id, api_hash):
+    """
+    ПОЛНОСТЬЮ СИНХРОННАЯ функция проверки обычных подарков
+    БЕЗ использования asyncio
+    """
     try:
+        # Создаем клиент синхронно
         app = Client(
             "temp_session",
             api_id=api_id,
@@ -26,14 +28,20 @@ async def check_regular_gifts_async(username, api_id, api_hash):
             workdir="."
         )
         
-        async with app:
-            user = await app.get_users(username)
+        # Запускаем клиент
+        app.start()
+        
+        try:
+            # Получаем пользователя
+            user = app.get_users(username)
             
+            # Получаем подарки
             try:
-                gifts = await app.get_gifts(user.id)
+                gifts = app.get_gifts(user.id)
             except:
                 gifts = []
             
+            # Считаем обычные подарки
             regular_gifts = 0
             if gifts:
                 for gift in gifts:
@@ -48,47 +56,20 @@ async def check_regular_gifts_async(username, api_id, api_hash):
                     if not is_upgraded:
                         regular_gifts += 1
             
+            # Останавливаем клиент
+            app.stop()
+            
             if regular_gifts > 0:
                 return f"✅ {username} - {regular_gifts} обычных подарков"
             else:
                 return None
                 
+        except Exception as e:
+            app.stop()
+            return f"❌ {username} - ошибка: {str(e)[:50]}"
+            
     except Exception as e:
         return f"❌ {username} - ошибка: {str(e)[:50]}"
-
-# ========== ФУНКЦИЯ ДЛЯ ЗАПУСКА В ОТДЕЛЬНОМ ПОТОКЕ ==========
-def run_check_in_thread(username, api_id, api_hash):
-    """
-    Запускает асинхронную проверку в отдельном потоке с собственным event loop
-    """
-    # Создаем новый event loop в этом потоке
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        # Запускаем асинхронную функцию
-        result = loop.run_until_complete(
-            check_regular_gifts_async(username, api_id, api_hash)
-        )
-        return result
-    except Exception as e:
-        return f"❌ {username} - ошибка: {str(e)[:50]}"
-    finally:
-        loop.close()
-
-# ========== СИНХРОННАЯ ОБЕРТКА ДЛЯ ПРОВЕРКИ ==========
-def check_gifts_sync(username, api_id, api_hash):
-    """
-    Синхронная обертка - запускает проверку в отдельном потоке
-    """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(
-            run_check_in_thread, 
-            username, 
-            api_id, 
-            api_hash
-        )
-        return future.result()
 
 # ========== КОМАНДА /start ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,11 +151,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = len(user_lists[user_id])
         
         for i, username in enumerate(user_lists[user_id], 1):
-            # Используем синхронную обертку
-            result = check_gifts_sync(username, API_ID, API_HASH)
+            # Используем СИНХРОННУЮ функцию (без asyncio)
+            result = check_regular_gifts_sync(username, API_ID, API_HASH)
             if result:
                 results.append(result)
             
+            # Обновляем прогресс каждые 5 аккаунтов
             if i % 5 == 0 or i == total:
                 try:
                     await query.edit_message_text(
@@ -186,6 +168,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
         
+        # Формируем финальный отчет
         if results:
             report = "🎁 **Аккаунты с обычными подарками:**\n\n"
             report += "\n".join(results)
@@ -193,12 +176,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             report = f"😕 **Не найдено аккаунтов с обычными подарками**\n\nПроверено: {total} аккаунтов"
         
+        # Отправляем результат
         if len(report) > 4000:
             for x in range(0, len(report), 4000):
                 await query.message.reply_text(report[x:x+4000])
         else:
             await query.message.reply_text(report, parse_mode="Markdown")
         
+        # Возвращаем главное меню
         await show_main_menu(query.message, user_id)
     
     elif action == "clear_list":
@@ -331,7 +316,8 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     total = len(user_lists[user_id])
     
     for i, username in enumerate(user_lists[user_id], 1):
-        result = check_gifts_sync(username, API_ID, API_HASH)
+        # Используем СИНХРОННУЮ функцию
+        result = check_regular_gifts_sync(username, API_ID, API_HASH)
         if result:
             results.append(result)
         
@@ -356,19 +342,23 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ========== ЗАПУСК БОТА ==========
 def main():
+    # Создаем приложение
     app = Application.builder().token(BOT_TOKEN).build()
     
+    # Добавляем команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("list", show_list))
     app.add_handler(CommandHandler("check", start_check_command))
     
+    # Добавляем обработчики
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
     print("🤖 Бот запущен и готов к работе!")
     print("📝 Пользователи могут вводить свои списки аккаунтов")
     
+    # Запускаем бота
     app.run_polling()
 
 if __name__ == "__main__":
