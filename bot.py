@@ -11,10 +11,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # ========== ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ==========
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-API_ID = int(os.environ.get("API_ID", 0))
-API_HASH = os.environ.get("API_HASH")
-PORT = int(os.environ.get("PORT", 8080))
+API_ID = 30993809  # ЗАМЕНИТЕ на ваш api_id
+API_HASH = "9f8a6194865005795b237ab95b4b0559"  # ЗАМЕНИТЕ на ваш api_hash
+BOT_TOKEN = "8534024087:AAE0MAIsHKoWjPA4cuqSKOubAlm7F0_xpG0"  # ЗАМЕНИТЕ на токен бота
+PORT = 8080
 
 if not BOT_TOKEN or not API_ID or not API_HASH:
     print("❌ ОШИБКА: Не все переменные окружения установлены!")
