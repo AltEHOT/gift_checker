@@ -9,22 +9,32 @@ API_ID = 12345  # ЗАМЕНИТЕ на ваш api_id
 API_HASH = "ваш_api_hash"  # ЗАМЕНИТЕ на ваш api_hash
 BOT_TOKEN = "ваш_токен_бота_от_BotFather"  # ЗАМЕНИТЕ на токен бота
 
-# Хранилище списков пользователей (в реальном боте лучше использовать БД)
+# Хранилище списков пользователей
 user_lists = {}
 
 # Функция проверки ТОЛЬКО неулучшенных подарков
 async def check_regular_gifts(username, api_id, api_hash):
     try:
+        # Используем новый способ создания клиента с правильным event loop
+        loop = asyncio.get_event_loop()
+        
         app = Client(
             "temp_session",
             api_id=api_id,
             api_hash=api_hash,
-            in_memory=True
+            in_memory=True,
+            workdir="."  # Добавляем рабочую директорию
         )
         
+        # Запускаем клиент и проверяем
         async with app:
             user = await app.get_users(username)
-            gifts = await app.get_gifts(user.id)
+            
+            # Получаем подарки пользователя
+            try:
+                gifts = await app.get_gifts(user.id)
+            except:
+                gifts = []
             
             regular_gifts = 0
             if gifts:
@@ -48,6 +58,15 @@ async def check_regular_gifts(username, api_id, api_hash):
                 
     except Exception as e:
         return f"❌ {username} - ошибка: {str(e)[:50]}"
+
+# Функция для проверки в отдельном event loop
+async def check_all_accounts(accounts):
+    results = []
+    for i, username in enumerate(accounts, 1):
+        result = await check_regular_gifts(username, API_ID, API_HASH)
+        if result:
+            results.append(result)
+    return results
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -96,7 +115,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif action == "view_list":
         if user_id in user_lists and user_lists[user_id]:
-            accounts = "\n".join(user_lists[user_id])
+            accounts = "\n".join([f"@{u}" for u in user_lists[user_id]])
             await query.edit_message_text(
                 f"📋 **Ваш список аккаунтов:**\n\n{accounts}\n\n"
                 f"Всего: {len(user_lists[user_id])} аккаунтов",
@@ -129,10 +148,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         results = []
         total = len(user_lists[user_id])
         
+        # Создаем отдельный event loop для pyrogram
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         for i, username in enumerate(user_lists[user_id], 1):
-            result = await check_regular_gifts(username, API_ID, API_HASH)
-            if result:
-                results.append(result)
+            try:
+                # Запускаем проверку с правильным event loop
+                result = await check_regular_gifts(username, API_ID, API_HASH)
+                if result:
+                    results.append(result)
+            except Exception as e:
+                pass
             
             # Обновляем прогресс каждые 5 аккаунтов
             if i % 5 == 0 or i == total:
@@ -145,6 +172,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except:
                     pass
+        
+        loop.close()
         
         # Формируем финальный отчет
         if results:
@@ -190,6 +219,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         await show_main_menu(query.message, user_id)
+    
+    elif action == "main_menu":
+        await show_main_menu(query.message, user_id)
 
 # Показать главное меню
 async def show_main_menu(message, user_id):
@@ -217,7 +249,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Если пользователь в режиме ввода списка
     if context.user_data.get('waiting_for_list'):
         # Парсим юзернеймы из текста
-        # Ищем все @username или просто username (латиница, цифры, подчеркивание)
         usernames = re.findall(r'@?[a-zA-Z0-9_]{5,}', text)
         
         # Очищаем от @ в начале
@@ -257,13 +288,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
     else:
-        # Если не в режиме ввода - просто игнорируем или показываем меню
-        await update.message.reply_text(
-            "Используйте кнопки меню или отправьте /start",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
-            ])
-        )
+        # Если не в режиме ввода - показываем меню
+        await show_main_menu(update.message, user_id)
 
 # Команда /cancel - отмена ввода списка
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -307,10 +333,17 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     results = []
     total = len(user_lists[user_id])
     
+    # Создаем отдельный event loop для pyrogram
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     for i, username in enumerate(user_lists[user_id], 1):
-        result = await check_regular_gifts(username, API_ID, API_HASH)
-        if result:
-            results.append(result)
+        try:
+            result = await check_regular_gifts(username, API_ID, API_HASH)
+            if result:
+                results.append(result)
+        except Exception as e:
+            pass
         
         if i % 5 == 0 or i == total:
             try:
@@ -321,6 +354,8 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             except:
                 pass
+    
+    loop.close()
     
     if results:
         report = "🎁 **Аккаунты с обычными подарками:**\n\n"
@@ -333,6 +368,7 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # Запуск бота
 def main():
+    # Создаем приложение
     app = Application.builder().token(BOT_TOKEN).build()
     
     # Команды
@@ -347,6 +383,8 @@ def main():
     
     print("🤖 Бот запущен и готов к работе!")
     print("📝 Пользователи могут вводить свои списки аккаунтов")
+    
+    # Запускаем бота
     app.run_polling()
 
 if __name__ == "__main__":
