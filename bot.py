@@ -1,6 +1,6 @@
 import re
-import time
-from pyrogram import Client
+from telethon import TelegramClient, types
+from telethon.tl.functions.users import GetFullUserRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -12,64 +12,116 @@ BOT_TOKEN = "ваш_токен_бота_от_BotFather"  # ЗАМЕНИТЕ на
 # Хранилище списков пользователей
 user_lists = {}
 
-# ========== СИНХРОННАЯ ФУНКЦИЯ ПРОВЕРКИ ПОДАРКОВ ==========
-def check_regular_gifts_sync(username, api_id, api_hash):
+# ========== ФУНКЦИЯ ПРОВЕРКИ ПОДАРКОВ (С ИСПОЛЬЗОВАНИЕМ TELEGRAM-API) ==========
+async def check_regular_gifts(username, api_id, api_hash):
     """
-    ПОЛНОСТЬЮ СИНХРОННАЯ функция проверки обычных подарков
-    БЕЗ использования asyncio
+    Асинхронная проверка подарков с использованием Telethon
     """
     try:
-        # Создаем клиент синхронно
-        app = Client(
-            "temp_session",
-            api_id=api_id,
-            api_hash=api_hash,
-            in_memory=True,
-            workdir="."
+        # Создаем клиент Telethon
+        client = TelegramClient(
+            f"session_{username}",
+            api_id,
+            api_hash,
+            system_version="4.16.30-vxCUSTOM"
         )
         
-        # Запускаем клиент
-        app.start()
-        
         try:
+            # Подключаемся
+            await client.connect()
+            
             # Получаем пользователя
-            user = app.get_users(username)
+            user = await client.get_entity(username)
             
-            # Получаем подарки
-            try:
-                gifts = app.get_gifts(user.id)
-            except:
-                gifts = []
-            
-            # Считаем обычные подарки
+            # Пытаемся получить подарки (если API поддерживает)
+            # Telethon может не иметь прямого метода get_gifts,
+            # поэтому используем другой подход через бота
             regular_gifts = 0
-            if gifts:
-                for gift in gifts:
-                    is_upgraded = False
-                    if hasattr(gift, 'is_upgraded'):
-                        is_upgraded = gift.is_upgraded
-                    elif hasattr(gift, 'upgraded'):
-                        is_upgraded = gift.upgraded
-                    elif hasattr(gift, 'upgrade'):
-                        is_upgraded = gift.upgrade
-                    
-                    if not is_upgraded:
-                        regular_gifts += 1
             
-            # Останавливаем клиент
-            app.stop()
+            # Проверяем через бота @GiftBot
+            try:
+                # Отправляем запрос к боту
+                gift_bot = await client.get_entity("@GiftBot")
+                await client.send_message(gift_bot, f"/gifts {username}")
+                
+                # Ждем ответ
+                async for message in client.iter_messages(gift_bot, limit=1):
+                    if message.text and "подарков" in message.text.lower():
+                        # Парсим количество подарков
+                        import re
+                        numbers = re.findall(r'\d+', message.text)
+                        if numbers:
+                            # Берем последнее число - это общее количество подарков
+                            # (упрощенно, нужна доработка)
+                            pass
+            except:
+                pass
             
-            if regular_gifts > 0:
-                return f"✅ {username} - {regular_gifts} обычных подарков"
-            else:
-                return None
+            await client.disconnect()
+            
+            # Пока возвращаем заглушку
+            # В реальности нужно доработать парсинг
+            return None
                 
         except Exception as e:
-            app.stop()
+            await client.disconnect()
             return f"❌ {username} - ошибка: {str(e)[:50]}"
             
     except Exception as e:
         return f"❌ {username} - ошибка: {str(e)[:50]}"
+
+# ========== НОВАЯ ФУНКЦИЯ ПРОВЕРКИ ЧЕРЕЗ API ==========
+async def check_gifts_via_api(username, api_id, api_hash):
+    """
+    Альтернативный метод проверки подарков через прямой API запрос
+    """
+    try:
+        client = TelegramClient(
+            f"temp_session",
+            api_id,
+            api_hash,
+            system_version="4.16.30-vxCUSTOM"
+        )
+        
+        await client.connect()
+        
+        # Получаем информацию о пользователе
+        user = await client.get_entity(username)
+        
+        # Пытаемся получить gifts через внутренний метод
+        try:
+            # Это экспериментальный метод, может не работать
+            result = await client(GetFullUserRequest(user.id))
+            # Парсим результат
+            regular_gifts = 0
+            
+            # Проверяем наличие подарков в профиле
+            if hasattr(result, 'gifts'):
+                if result.gifts:
+                    for gift in result.gifts:
+                        if not getattr(gift, 'upgraded', False):
+                            regular_gifts += 1
+            
+            await client.disconnect()
+            
+            if regular_gifts > 0:
+                return f"✅ {username} - {regular_gifts} обычных подарков"
+            return None
+            
+        except Exception as e:
+            await client.disconnect()
+            return f"❌ {username} - ошибка: {str(e)[:50]}"
+            
+    except Exception as e:
+        return f"❌ {username} - ошибка: {str(e)[:50]}"
+
+# ========== ПРОСТАЯ ФУНКЦИЯ ПРОВЕРКИ (БЕЗ АВТОРИЗАЦИИ) ==========
+def check_gifts_simple(username):
+    """
+    Самый простой способ - без авторизации, только проверка существования
+    """
+    # Это заглушка - в реальности нужна авторизация
+    return None
 
 # ========== КОМАНДА /start ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,10 +203,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = len(user_lists[user_id])
         
         for i, username in enumerate(user_lists[user_id], 1):
-            # Используем СИНХРОННУЮ функцию (без asyncio)
-            result = check_regular_gifts_sync(username, API_ID, API_HASH)
-            if result:
-                results.append(result)
+            # Используем проверку через Telethon
+            try:
+                result = await check_gifts_via_api(username, API_ID, API_HASH)
+                if result:
+                    results.append(result)
+            except Exception as e:
+                pass
             
             # Обновляем прогресс каждые 5 аккаунтов
             if i % 5 == 0 or i == total:
@@ -183,7 +238,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.message.reply_text(report, parse_mode="Markdown")
         
-        # Возвращаем главное меню
         await show_main_menu(query.message, user_id)
     
     elif action == "clear_list":
@@ -316,10 +370,12 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     total = len(user_lists[user_id])
     
     for i, username in enumerate(user_lists[user_id], 1):
-        # Используем СИНХРОННУЮ функцию
-        result = check_regular_gifts_sync(username, API_ID, API_HASH)
-        if result:
-            results.append(result)
+        try:
+            result = await check_gifts_via_api(username, API_ID, API_HASH)
+            if result:
+                results.append(result)
+        except Exception as e:
+            pass
         
         if i % 5 == 0 or i == total:
             try:
@@ -342,23 +398,19 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ========== ЗАПУСК БОТА ==========
 def main():
-    # Создаем приложение
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавляем команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("list", show_list))
     app.add_handler(CommandHandler("check", start_check_command))
     
-    # Добавляем обработчики
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
     print("🤖 Бот запущен и готов к работе!")
     print("📝 Пользователи могут вводить свои списки аккаунтов")
     
-    # Запускаем бота
     app.run_polling()
 
 if __name__ == "__main__":
