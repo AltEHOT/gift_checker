@@ -1,6 +1,6 @@
 import re
-from telethon import TelegramClient, types
-from telethon.tl.functions.users import GetFullUserRequest
+import asyncio
+from telethon import TelegramClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -12,116 +12,71 @@ BOT_TOKEN = "ваш_токен_бота_от_BotFather"  # ЗАМЕНИТЕ на
 # Хранилище списков пользователей
 user_lists = {}
 
-# ========== ФУНКЦИЯ ПРОВЕРКИ ПОДАРКОВ (С ИСПОЛЬЗОВАНИЕМ TELEGRAM-API) ==========
-async def check_regular_gifts(username, api_id, api_hash):
+# ========== ФУНКЦИЯ ПРОВЕРКИ ПОДАРКОВ ЧЕРЕЗ @GiftBot ==========
+async def check_gifts_through_bot(username, api_id, api_hash):
     """
-    Асинхронная проверка подарков с использованием Telethon
+    Проверка подарков через бота @GiftBot
+    Отправляет запрос боту и парсит ответ
     """
     try:
         # Создаем клиент Telethon
         client = TelegramClient(
-            f"session_{username}",
+            f"session_{username.replace('@', '')}",
             api_id,
             api_hash,
             system_version="4.16.30-vxCUSTOM"
         )
         
-        try:
-            # Подключаемся
-            await client.connect()
-            
-            # Получаем пользователя
-            user = await client.get_entity(username)
-            
-            # Пытаемся получить подарки (если API поддерживает)
-            # Telethon может не иметь прямого метода get_gifts,
-            # поэтому используем другой подход через бота
-            regular_gifts = 0
-            
-            # Проверяем через бота @GiftBot
-            try:
-                # Отправляем запрос к боту
-                gift_bot = await client.get_entity("@GiftBot")
-                await client.send_message(gift_bot, f"/gifts {username}")
-                
-                # Ждем ответ
-                async for message in client.iter_messages(gift_bot, limit=1):
-                    if message.text and "подарков" in message.text.lower():
-                        # Парсим количество подарков
-                        import re
-                        numbers = re.findall(r'\d+', message.text)
-                        if numbers:
-                            # Берем последнее число - это общее количество подарков
-                            # (упрощенно, нужна доработка)
-                            pass
-            except:
-                pass
-            
-            await client.disconnect()
-            
-            # Пока возвращаем заглушку
-            # В реальности нужно доработать парсинг
-            return None
-                
-        except Exception as e:
-            await client.disconnect()
-            return f"❌ {username} - ошибка: {str(e)[:50]}"
-            
-    except Exception as e:
-        return f"❌ {username} - ошибка: {str(e)[:50]}"
-
-# ========== НОВАЯ ФУНКЦИЯ ПРОВЕРКИ ЧЕРЕЗ API ==========
-async def check_gifts_via_api(username, api_id, api_hash):
-    """
-    Альтернативный метод проверки подарков через прямой API запрос
-    """
-    try:
-        client = TelegramClient(
-            f"temp_session",
-            api_id,
-            api_hash,
-            system_version="4.16.30-vxCUSTOM"
-        )
-        
+        # Подключаемся
         await client.connect()
         
-        # Получаем информацию о пользователе
-        user = await client.get_entity(username)
+        # Получаем GiftBot
+        gift_bot = await client.get_entity("@GiftBot")
         
-        # Пытаемся получить gifts через внутренний метод
-        try:
-            # Это экспериментальный метод, может не работать
-            result = await client(GetFullUserRequest(user.id))
-            # Парсим результат
-            regular_gifts = 0
-            
-            # Проверяем наличие подарков в профиле
-            if hasattr(result, 'gifts'):
-                if result.gifts:
-                    for gift in result.gifts:
-                        if not getattr(gift, 'upgraded', False):
-                            regular_gifts += 1
-            
-            await client.disconnect()
-            
-            if regular_gifts > 0:
-                return f"✅ {username} - {regular_gifts} обычных подарков"
+        # Отправляем запрос на проверку подарков
+        await client.send_message(gift_bot, f"/gifts {username}")
+        
+        # Ждем ответ (боту нужно время на обработку)
+        await asyncio.sleep(5)
+        
+        # Получаем последнее сообщение от GiftBot
+        regular_gifts = 0
+        total_gifts = 0
+        
+        async for message in client.iter_messages(gift_bot, limit=5):
+            if message.text and username in message.text:
+                text = message.text
+                
+                # Ищем числа в тексте
+                numbers = re.findall(r'\d+', text)
+                
+                # В ответе GiftBot обычно два числа: улучшенные и обычные
+                if numbers:
+                    # Если есть 2 числа - второе это обычные подарки
+                    if len(numbers) >= 2:
+                        total_gifts = int(numbers[0]) if numbers[0] else 0
+                        regular_gifts = int(numbers[1]) if len(numbers) > 1 else 0
+                    else:
+                        # Если одно число - это общее количество
+                        total_gifts = int(numbers[0])
+                        regular_gifts = total_gifts
+                
+                break
+        
+        # Отключаемся
+        await client.disconnect()
+        
+        # Возвращаем результат только если есть обычные подарки
+        if regular_gifts > 0:
+            return f"✅ {username} - {regular_gifts} обычных подарков"
+        elif total_gifts > 0:
+            # Если есть только улучшенные подарки
+            return None  # Пропускаем, так как нужны только обычные
+        else:
             return None
-            
-        except Exception as e:
-            await client.disconnect()
-            return f"❌ {username} - ошибка: {str(e)[:50]}"
-            
+                
     except Exception as e:
         return f"❌ {username} - ошибка: {str(e)[:50]}"
-
-# ========== ПРОСТАЯ ФУНКЦИЯ ПРОВЕРКИ (БЕЗ АВТОРИЗАЦИИ) ==========
-def check_gifts_simple(username):
-    """
-    Самый простой способ - без авторизации, только проверка существования
-    """
-    # Это заглушка - в реальности нужна авторизация
-    return None
 
 # ========== КОМАНДА /start ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -138,11 +93,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "🎁 **Бот для проверки обычных подарков**\n\n"
-        "Я помогу вам найти аккаунты, у которых есть обычные (неулучшенные) подарки.\n\n"
+        "Я проверяю аккаунты через @GiftBot.\n\n"
         "📌 **Как пользоваться:**\n"
         "1. Нажмите 'Ввести список аккаунтов'\n"
         "2. Отправьте список юзернеймов (каждый с новой строки)\n"
         "3. Нажмите 'Начать проверку'\n\n"
+        "⏱ Проверка может занять 2-3 минуты.\n"
         "⚠️ Аккаунты проверяются через ваш API (my.telegram.org)",
         reply_markup=reply_markup,
         parse_mode="Markdown"
@@ -195,7 +151,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🔍 **Начинаю проверку...**\n\n"
             f"Проверяю {len(user_lists[user_id])} аккаунтов.\n"
-            "Это может занять несколько минут...",
+            "⏱ Это может занять 2-3 минуты...\n\n"
+            "Бот отправляет запросы @GiftBot и ждет ответы.",
             parse_mode="Markdown"
         )
         
@@ -203,16 +160,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = len(user_lists[user_id])
         
         for i, username in enumerate(user_lists[user_id], 1):
-            # Используем проверку через Telethon
+            # Используем функцию проверки через @GiftBot
             try:
-                result = await check_gifts_via_api(username, API_ID, API_HASH)
+                result = await check_gifts_through_bot(username, API_ID, API_HASH)
                 if result:
                     results.append(result)
             except Exception as e:
                 pass
             
-            # Обновляем прогресс каждые 5 аккаунтов
-            if i % 5 == 0 or i == total:
+            # Обновляем прогресс каждые 3 аккаунта
+            if i % 3 == 0 or i == total:
                 try:
                     await query.edit_message_text(
                         f"🔍 **Проверка...**\n\n"
@@ -253,7 +210,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "❓ **Помощь**\n\n"
             "🤖 **Что умеет этот бот?**\n"
-            "Проверяет аккаунты на наличие обычных (неулучшенных) подарков.\n\n"
+            "Проверяет аккаунты на наличие обычных (неулучшенных) подарков.\n"
+            "Для этого он использует @GiftBot.\n\n"
             "📝 **Как добавить аккаунты?**\n"
             "1. Нажмите 'Ввести список аккаунтов'\n"
             "2. Отправьте юзернеймы (с @ или без)\n"
@@ -262,7 +220,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "После добавления списка нажмите 'Начать проверку'\n\n"
             "⚠️ **Важно:**\n"
             "Бот использует ваш API ID и API HASH из my.telegram.org\n"
-            "Аккаунты НЕ сохраняются на сервере.",
+            "Аккаунты НЕ сохраняются на сервере.\n\n"
+            "⏱ Время проверки: ~3-5 секунд на аккаунт",
             parse_mode="Markdown"
         )
         await show_main_menu(query.message, user_id)
@@ -294,6 +253,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
     if context.user_data.get('waiting_for_list'):
+        # Находим все юзернеймы в тексте
         usernames = re.findall(r'@?[a-zA-Z0-9_]{5,}', text)
         usernames = [u.lstrip('@') for u in usernames]
         usernames = list(dict.fromkeys(usernames))
@@ -362,7 +322,8 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     await update.message.reply_text(
         f"🔍 **Начинаю проверку...**\n\n"
-        f"Проверяю {len(user_lists[user_id])} аккаунтов...",
+        f"Проверяю {len(user_lists[user_id])} аккаунтов.\n"
+        "⏱ Это может занять несколько минут...",
         parse_mode="Markdown"
     )
     
@@ -371,13 +332,13 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     for i, username in enumerate(user_lists[user_id], 1):
         try:
-            result = await check_gifts_via_api(username, API_ID, API_HASH)
+            result = await check_gifts_through_bot(username, API_ID, API_HASH)
             if result:
                 results.append(result)
         except Exception as e:
             pass
         
-        if i % 5 == 0 or i == total:
+        if i % 3 == 0 or i == total:
             try:
                 await update.message.reply_text(
                     f"⏳ Прогресс: {i}/{total}\n"
@@ -410,6 +371,7 @@ def main():
     
     print("🤖 Бот запущен и готов к работе!")
     print("📝 Пользователи могут вводить свои списки аккаунтов")
+    print("🔍 Проверка выполняется через @GiftBot")
     
     app.run_polling()
 
