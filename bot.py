@@ -384,7 +384,9 @@ def main():
     print("🤖 Бот запущен и готов к работе!")
     print("📝 Пользователи могут вводить свои списки аккаунтов")
     
-    # Запускаем бота
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    main()
     app.run_polling()
 
 if __name__ == "__main__":
