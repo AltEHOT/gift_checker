@@ -1,5 +1,7 @@
 import asyncio
 import re
+import concurrent.futures
+import threading
 from pyrogram import Client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -13,7 +15,7 @@ BOT_TOKEN = "ваш_токен_бота_от_BotFather"  # ЗАМЕНИТЕ на
 user_lists = {}
 
 # ========== ОСНОВНАЯ ФУНКЦИЯ ПРОВЕРКИ (АСИНХРОННАЯ) ==========
-async def check_regular_gifts(username, api_id, api_hash):
+async def check_regular_gifts_async(username, api_id, api_hash):
     """Асинхронная функция проверки обычных подарков у одного аккаунта"""
     try:
         app = Client(
@@ -54,22 +56,39 @@ async def check_regular_gifts(username, api_id, api_hash):
     except Exception as e:
         return f"❌ {username} - ошибка: {str(e)[:50]}"
 
-# ========== ФУНКЦИЯ ДЛЯ ЗАПУСКА ПРОВЕРКИ В ОТДЕЛЬНОМ LOOP ==========
-def run_check(username, api_id, api_hash):
+# ========== ФУНКЦИЯ ДЛЯ ЗАПУСКА В ОТДЕЛЬНОМ ПОТОКЕ ==========
+def run_check_in_thread(username, api_id, api_hash):
     """
-    Синхронная обертка для запуска асинхронной проверки.
-    Создает отдельный event loop для каждого вызова.
+    Запускает асинхронную проверку в отдельном потоке с собственным event loop
     """
+    # Создаем новый event loop в этом потоке
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Запускаем асинхронную функцию
         result = loop.run_until_complete(
-            check_regular_gifts(username, api_id, api_hash)
+            check_regular_gifts_async(username, api_id, api_hash)
         )
-        loop.close()
         return result
     except Exception as e:
-        return f"❌ {username} - ошибка при запуске: {str(e)[:50]}"
+        return f"❌ {username} - ошибка: {str(e)[:50]}"
+    finally:
+        loop.close()
+
+# ========== СИНХРОННАЯ ОБЕРТКА ДЛЯ ПРОВЕРКИ ==========
+def check_gifts_sync(username, api_id, api_hash):
+    """
+    Синхронная обертка - запускает проверку в отдельном потоке
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            run_check_in_thread, 
+            username, 
+            api_id, 
+            api_hash
+        )
+        return future.result()
 
 # ========== КОМАНДА /start ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,7 +170,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = len(user_lists[user_id])
         
         for i, username in enumerate(user_lists[user_id], 1):
-            result = run_check(username, API_ID, API_HASH)
+            # Используем синхронную обертку
+            result = check_gifts_sync(username, API_ID, API_HASH)
             if result:
                 results.append(result)
             
@@ -311,7 +331,7 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     total = len(user_lists[user_id])
     
     for i, username in enumerate(user_lists[user_id], 1):
-        result = run_check(username, API_ID, API_HASH)
+        result = check_gifts_sync(username, API_ID, API_HASH)
         if result:
             results.append(result)
         
