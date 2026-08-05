@@ -54,41 +54,22 @@ async def check_regular_gifts(username, api_id, api_hash):
     except Exception as e:
         return f"❌ {username} - ошибка: {str(e)[:50]}"
 
-# ========== НОВАЯ ФУНКЦИЯ ДЛЯ ЗАПУСКА ПРОВЕРКИ В ОТДЕЛЬНОМ LOOP ==========
+# ========== ФУНКЦИЯ ДЛЯ ЗАПУСКА ПРОВЕРКИ В ОТДЕЛЬНОМ LOOP ==========
 def run_check(username, api_id, api_hash):
     """
     Синхронная обертка для запуска асинхронной проверки.
     Создает отдельный event loop для каждого вызова.
     """
     try:
-        # Создаем новый event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
-        # Запускаем асинхронную функцию в этом loop
         result = loop.run_until_complete(
             check_regular_gifts(username, api_id, api_hash)
         )
-        
         loop.close()
         return result
-        
     except Exception as e:
         return f"❌ {username} - ошибка при запуске: {str(e)[:50]}"
-
-# ========== ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ВСЕХ АККАУНТОВ ==========
-def check_all_accounts(accounts, api_id, api_hash):
-    """Проверяет все аккаунты из списка, используя run_check"""
-    results = []
-    total = len(accounts)
-    
-    for i, username in enumerate(accounts, 1):
-        # Используем run_check вместо прямого вызова async функции
-        result = run_check(username, api_id, api_hash)
-        if result:
-            results.append(result)
-    
-    return results
 
 # ========== КОМАНДА /start ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -166,17 +147,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         
-        # ========== ИСПОЛЬЗУЕМ run_check ДЛЯ ПРОВЕРКИ ==========
         results = []
         total = len(user_lists[user_id])
         
         for i, username in enumerate(user_lists[user_id], 1):
-            # Вызываем run_check (синхронная функция)
             result = run_check(username, API_ID, API_HASH)
             if result:
                 results.append(result)
             
-            # Обновляем прогресс каждые 5 аккаунтов
             if i % 5 == 0 or i == total:
                 try:
                     await query.edit_message_text(
@@ -188,7 +166,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
         
-        # Формируем финальный отчет
         if results:
             report = "🎁 **Аккаунты с обычными подарками:**\n\n"
             report += "\n".join(results)
@@ -196,14 +173,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             report = f"😕 **Не найдено аккаунтов с обычными подарками**\n\nПроверено: {total} аккаунтов"
         
-        # Отправляем результат
         if len(report) > 4000:
             for x in range(0, len(report), 4000):
                 await query.message.reply_text(report[x:x+4000])
         else:
             await query.message.reply_text(report, parse_mode="Markdown")
         
-        # Возвращаем главное меню
         await show_main_menu(query.message, user_id)
     
     elif action == "clear_list":
@@ -336,7 +311,6 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     total = len(user_lists[user_id])
     
     for i, username in enumerate(user_lists[user_id], 1):
-        # ========== ИСПОЛЬЗУЕМ run_check ДЛЯ ПРОВЕРКИ ==========
         result = run_check(username, API_ID, API_HASH)
         if result:
             results.append(result)
