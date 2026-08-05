@@ -69,7 +69,7 @@ async def check_gifts_telethon(username, api_id, api_hash):
     try:
         # Создаем клиент Telethon
         client = TelegramClient(
-            f"session_{username.replace('@', '')}",
+            "my_session",
             api_id,
             api_hash,
             system_version="4.16.30-vxCUSTOM"
