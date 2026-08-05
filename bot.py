@@ -1,46 +1,24 @@
 import asyncio
-import os
+import re
 from pyrogram import Client
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # ВАШИ ДАННЫЕ (получите их на my.telegram.org)
-API_ID = 30993809
-API_HASH = "9f8a6194865005795b237ab95b4b0559"
-BOT_TOKEN = "8534024087:AAE0MAIsHKoWjPA4cuqSKOubAlm7F0_xpG0"
+API_ID = 12345  # ЗАМЕНИТЕ на ваш api_id
+API_HASH = "ваш_api_hash"  # ЗАМЕНИТЕ на ваш api_hash
+BOT_TOKEN = "ваш_токен_бота_от_BotFather"  # ЗАМЕНИТЕ на токен бота
 
-# СПИСОК АККАУНТОВ ДЛЯ ПРОВЕРКИ (вставьте ваш список)
-ACCOUNTS = [
-    "@sirkapirkaw", "@sofuuha", "@nuwxkdr", "@mirzzevva", "@nasyaas11",
-    "@your_mom_17", "@ttaiisii", "@mklovi", "@pooopssa67", "@Bobby13034",
-    "@cf_oiya", "@Angel_ocnek", "@massh_axq69", "@ssba_5", "@Sasha35791",
-    "@mn_2304g", "@sstaylo", "@Deis_MN", "@nixie0pixie", "@liizz28",
-    "@Jelovek01", "@jdksmsmmsa", "@AlenaSurkova", "@dieu38_q", "@POKRUCHINN",
-    "@Jaydg444", "@Anastasia_Sia20", "@mryayuu", "@liksoha", "@Holodilnik8",
-    "@dzmiila", "@soomnea", "@polinka_I_I", "@meewQs", "@Sanfreeg",
-    "@artiles2", "@vuvtuss", "@twsprkr", "@alm0st_nothing", "@lyubwx",
-    "@gri_ksusha", "@brunetka9", "@mariiiela", "@heartsfw", "@lpauchokl",
-    "@TonyHM6", "@krisi_st", "@alleeeka", "@Puddin7D", "@untoter",
-    "@ystwith", "@FF9O01", "@lumaolq", "@talinix", "@dir2hades",
-    "@llpnu", "@oshytik", "@cats2w", "@Karisa2008", "@def1f",
-    "@sschaaq", "@darikswx104", "@aalin4iik", "@dka_rinaa", "@Marichk_13",
-    "@yer58", "@ZEYT1K", "@Sashunya18", "@YMV_4", "@qwertxlee",
-    "@anastasiax1203", "@dollinoll", "@mi_meowww", "@kcuuqwxx", "@sofiachmakina",
-    "@Nikyla888", "@pivnamonashka", "@hhhqush", "@xmarihn", "@YuliaTrima",
-    "@kkkkhrtuk", "@kimmiinaass", "@WanWany1", "@laurqiv", "@vvulia",
-    "@maryashkacrash", "@byrachochok", "@iLkoOk08", "@senokosovaem", "@ww_kl0",
-    "@nstxcw", "@kotteeeeewq", "@Vikss709", "@yullx", "@mariiankka",
-    "@lasq_wx", "@zz_z_z_zzzz_zz", "@nik_945", "@kriwzxw", "@dzsrt"
-]
+# Хранилище списков пользователей (в реальном боте лучше использовать БД)
+user_lists = {}
 
-# Функция проверки подарков у одного аккаунта
-async def check_gifts(username):
+# Функция проверки ТОЛЬКО неулучшенных подарков
+async def check_regular_gifts(username, api_id, api_hash):
     try:
-        # Создаем временную сессию для проверки
         app = Client(
             "temp_session",
-            api_id=API_ID,
-            api_hash=API_HASH,
+            api_id=api_id,
+            api_hash=api_hash,
             in_memory=True
         )
         
@@ -48,49 +26,327 @@ async def check_gifts(username):
             user = await app.get_users(username)
             gifts = await app.get_gifts(user.id)
             
-            # Считаем подарки
-            total_gifts = 0
+            regular_gifts = 0
             if gifts:
-                total_gifts = len(gifts)
+                for gift in gifts:
+                    # Проверяем, улучшен ли подарок
+                    is_upgraded = False
+                    if hasattr(gift, 'is_upgraded'):
+                        is_upgraded = gift.is_upgraded
+                    elif hasattr(gift, 'upgraded'):
+                        is_upgraded = gift.upgraded
+                    elif hasattr(gift, 'upgrade'):
+                        is_upgraded = gift.upgrade
+                    
+                    if not is_upgraded:
+                        regular_gifts += 1
             
-            return f"{username} - {total_gifts}"
+            if regular_gifts > 0:
+                return f"✅ {username} - {regular_gifts} обычных подарков"
+            else:
+                return None
+                
     except Exception as e:
-        return f"{username} - Ошибка: {str(e)}"
+        return f"❌ {username} - ошибка: {str(e)[:50]}"
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    keyboard = [
+        [InlineKeyboardButton("📝 Ввести список аккаунтов", callback_data="enter_list")],
+        [InlineKeyboardButton("📋 Посмотреть мой список", callback_data="view_list")],
+        [InlineKeyboardButton("🚀 Начать проверку", callback_data="start_check")],
+        [InlineKeyboardButton("🗑 Очистить список", callback_data="clear_list")],
+        [InlineKeyboardButton("❓ Помощь", callback_data="help")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await update.message.reply_text(
-        "🔍 Начинаю проверку подарков...\n"
-        "Это может занять несколько минут.\n"
-        "Я проверю все аккаунты из списка!"
+        "🎁 **Бот для проверки обычных подарков**\n\n"
+        "Я помогу вам найти аккаунты, у которых есть обычные (неулучшенные) подарки.\n\n"
+        "📌 **Как пользоваться:**\n"
+        "1. Нажмите 'Ввести список аккаунтов'\n"
+        "2. Отправьте список юзернеймов (каждый с новой строки)\n"
+        "3. Нажмите 'Начать проверку'\n\n"
+        "⚠️ Аккаунты проверяются через ваш API (my.telegram.org)",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+# Обработчик кнопок
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    action = query.data
+    
+    if action == "enter_list":
+        context.user_data['waiting_for_list'] = True
+        await query.edit_message_text(
+            "📝 **Отправьте список аккаунтов**\n\n"
+            "Каждый юзернейм с новой строки.\n"
+            "Пример:\n"
+            "`@user1\n@user2\n@user3`\n\n"
+            "Или просто отправьте текст с юзернеймами.\n"
+            "Нажмите /cancel чтобы отменить.",
+            parse_mode="Markdown"
+        )
+    
+    elif action == "view_list":
+        if user_id in user_lists and user_lists[user_id]:
+            accounts = "\n".join(user_lists[user_id])
+            await query.edit_message_text(
+                f"📋 **Ваш список аккаунтов:**\n\n{accounts}\n\n"
+                f"Всего: {len(user_lists[user_id])} аккаунтов",
+                parse_mode="Markdown"
+            )
+        else:
+            await query.edit_message_text(
+                "📭 **Список пуст**\n\n"
+                "Нажмите 'Ввести список аккаунтов' чтобы добавить аккаунты.",
+                parse_mode="Markdown"
+            )
+    
+    elif action == "start_check":
+        if user_id not in user_lists or not user_lists[user_id]:
+            await query.edit_message_text(
+                "❌ **Список пуст!**\n\n"
+                "Сначала добавьте аккаунты через 'Ввести список аккаунтов'.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        await query.edit_message_text(
+            "🔍 **Начинаю проверку...**\n\n"
+            f"Проверяю {len(user_lists[user_id])} аккаунтов.\n"
+            "Это может занять несколько минут...",
+            parse_mode="Markdown"
+        )
+        
+        # Проверяем аккаунты
+        results = []
+        total = len(user_lists[user_id])
+        
+        for i, username in enumerate(user_lists[user_id], 1):
+            result = await check_regular_gifts(username, API_ID, API_HASH)
+            if result:
+                results.append(result)
+            
+            # Обновляем прогресс каждые 5 аккаунтов
+            if i % 5 == 0 or i == total:
+                try:
+                    await query.edit_message_text(
+                        f"🔍 **Проверка...**\n\n"
+                        f"✅ Проверено: {i}/{total}\n"
+                        f"🎁 Найдено с обычными подарками: {len(results)}",
+                        parse_mode="Markdown"
+                    )
+                except:
+                    pass
+        
+        # Формируем финальный отчет
+        if results:
+            report = "🎁 **Аккаунты с обычными подарками:**\n\n"
+            report += "\n".join(results)
+            report += f"\n\n📊 **Найдено: {len(results)} из {total}**"
+        else:
+            report = f"😕 **Не найдено аккаунтов с обычными подарками**\n\nПроверено: {total} аккаунтов"
+        
+        # Отправляем результат
+        if len(report) > 4000:
+            for x in range(0, len(report), 4000):
+                await query.message.reply_text(report[x:x+4000])
+        else:
+            await query.message.reply_text(report, parse_mode="Markdown")
+        
+        # Возвращаем главное меню
+        await show_main_menu(query.message, user_id)
+    
+    elif action == "clear_list":
+        if user_id in user_lists:
+            del user_lists[user_id]
+        await query.edit_message_text(
+            "🗑 **Список очищен!**",
+            parse_mode="Markdown"
+        )
+        await show_main_menu(query.message, user_id)
+    
+    elif action == "help":
+        await query.edit_message_text(
+            "❓ **Помощь**\n\n"
+            "🤖 **Что умеет этот бот?**\n"
+            "Проверяет аккаунты на наличие обычных (неулучшенных) подарков.\n\n"
+            "📝 **Как добавить аккаунты?**\n"
+            "1. Нажмите 'Ввести список аккаунтов'\n"
+            "2. Отправьте юзернеймы (с @ или без)\n"
+            "3. Каждый юзернейм с новой строки\n\n"
+            "🚀 **Как проверить?**\n"
+            "После добавления списка нажмите 'Начать проверку'\n\n"
+            "⚠️ **Важно:**\n"
+            "Бот использует ваш API ID и API HASH из my.telegram.org\n"
+            "Аккаунты НЕ сохраняются на сервере.",
+            parse_mode="Markdown"
+        )
+        await show_main_menu(query.message, user_id)
+
+# Показать главное меню
+async def show_main_menu(message, user_id):
+    keyboard = [
+        [InlineKeyboardButton("📝 Ввести список аккаунтов", callback_data="enter_list")],
+        [InlineKeyboardButton("📋 Посмотреть мой список", callback_data="view_list")],
+        [InlineKeyboardButton("🚀 Начать проверку", callback_data="start_check")],
+        [InlineKeyboardButton("🗑 Очистить список", callback_data="clear_list")],
+        [InlineKeyboardButton("❓ Помощь", callback_data="help")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await message.reply_text(
+        "🏠 **Главное меню**\n\n"
+        "Выберите действие:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+# Обработчик текстовых сообщений (для ввода списка)
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    # Если пользователь в режиме ввода списка
+    if context.user_data.get('waiting_for_list'):
+        # Парсим юзернеймы из текста
+        # Ищем все @username или просто username (латиница, цифры, подчеркивание)
+        usernames = re.findall(r'@?[a-zA-Z0-9_]{5,}', text)
+        
+        # Очищаем от @ в начале
+        usernames = [u.lstrip('@') for u in usernames]
+        
+        # Убираем дубликаты
+        usernames = list(dict.fromkeys(usernames))
+        
+        if usernames:
+            # Сохраняем в список пользователя
+            if user_id not in user_lists:
+                user_lists[user_id] = []
+            
+            # Добавляем новые аккаунты (без дубликатов внутри списка)
+            existing = set(user_lists[user_id])
+            new_accounts = [u for u in usernames if u not in existing]
+            user_lists[user_id].extend(new_accounts)
+            
+            context.user_data['waiting_for_list'] = False
+            
+            await update.message.reply_text(
+                f"✅ **Добавлено {len(new_accounts)} аккаунтов!**\n\n"
+                f"Всего в списке: {len(user_lists[user_id])} аккаунтов\n\n"
+                f"Добавленные:\n" + "\n".join([f"@{u}" for u in new_accounts[:10]]) + 
+                (f"\n...и еще {len(new_accounts)-10}" if len(new_accounts) > 10 else ""),
+                parse_mode="Markdown"
+            )
+            
+            # Показываем главное меню
+            await show_main_menu(update.message, user_id)
+        else:
+            await update.message.reply_text(
+                "❌ **Не найдено юзернеймов**\n\n"
+                "Убедитесь, что вы отправили список в правильном формате:\n"
+                "`@user1\n@user2\n@user3`\n\n"
+                "Или просто отправьте /cancel чтобы отменить.",
+                parse_mode="Markdown"
+            )
+    else:
+        # Если не в режиме ввода - просто игнорируем или показываем меню
+        await update.message.reply_text(
+            "Используйте кнопки меню или отправьте /start",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+            ])
+        )
+
+# Команда /cancel - отмена ввода списка
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['waiting_for_list'] = False
+    await update.message.reply_text(
+        "❌ **Ввод списка отменен**",
+        parse_mode="Markdown"
+    )
+    await show_main_menu(update.message, update.effective_user.id)
+
+# Команда /list - показать список
+async def show_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in user_lists and user_lists[user_id]:
+        accounts = "\n".join([f"@{u}" for u in user_lists[user_id]])
+        await update.message.reply_text(
+            f"📋 **Ваш список аккаунтов:**\n\n{accounts}\n\n"
+            f"Всего: {len(user_lists[user_id])} аккаунтов",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text("📭 Список пуст")
+
+# Команда /check - начать проверку
+async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in user_lists or not user_lists[user_id]:
+        await update.message.reply_text(
+            "❌ **Список пуст!**\n\nСначала добавьте аккаунты через /start",
+            parse_mode="Markdown"
+        )
+        return
+    
+    await update.message.reply_text(
+        f"🔍 **Начинаю проверку...**\n\n"
+        f"Проверяю {len(user_lists[user_id])} аккаунтов...",
+        parse_mode="Markdown"
     )
     
-    # Проверяем каждый аккаунт
+    # Проверяем аккаунты (аналогично кнопке)
     results = []
-    for i, username in enumerate(ACCOUNTS, 1):
-        result = await check_gifts(username)
-        results.append(result)
+    total = len(user_lists[user_id])
+    
+    for i, username in enumerate(user_lists[user_id], 1):
+        result = await check_regular_gifts(username, API_ID, API_HASH)
+        if result:
+            results.append(result)
         
-        # Отправляем промежуточный результат каждые 10 аккаунтов
-        if i % 10 == 0:
-            await update.message.reply_text(f"✅ Проверено {i} из {len(ACCOUNTS)} аккаунтов")
+        if i % 5 == 0 or i == total:
+            try:
+                await update.message.reply_text(
+                    f"⏳ Прогресс: {i}/{total}\n"
+                    f"Найдено: {len(results)}",
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
     
-    # Формируем финальный отчет
-    report = "📊 **Результаты проверки подарков:**\n\n"
-    report += "\n".join(results)
-    
-    # Отправляем результат (если слишком длинно - разбиваем на части)
-    if len(report) > 4000:
-        for x in range(0, len(report), 4000):
-            await update.message.reply_text(report[x:x+4000])
+    if results:
+        report = "🎁 **Аккаунты с обычными подарками:**\n\n"
+        report += "\n".join(results)
+        report += f"\n\n📊 **Найдено: {len(results)} из {total}**"
     else:
-        await update.message.reply_text(report)
+        report = f"😕 **Не найдено аккаунтов с обычными подарками**\n\nПроверено: {total} аккаунтов"
+    
+    await update.message.reply_text(report, parse_mode="Markdown")
 
 # Запуск бота
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Команды
     app.add_handler(CommandHandler("start", start))
-    print("Бот запущен и готов к работе!")
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("list", show_list))
+    app.add_handler(CommandHandler("check", start_check_command))
+    
+    # Обработчики
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
+    print("🤖 Бот запущен и готов к работе!")
+    print("📝 Пользователи могут вводить свои списки аккаунтов")
     app.run_polling()
 
 if __name__ == "__main__":
