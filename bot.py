@@ -6,7 +6,8 @@ import sys
 import asyncio
 import threading
 from flask import Flask, request, jsonify
-from telethon import TelegramClient
+from pyrogram import Client
+from pyrogram.types import Gifts
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -59,74 +60,93 @@ def shutdown_handler(signum, frame):
 signal.signal(signal.SIGINT, shutdown_handler)
 signal.signal(signal.SIGTERM, shutdown_handler)
 
-# ========== ФУНКЦИЯ ДЛЯ БЕЗОПАСНОЙ ОТПРАВКИ СООБЩЕНИЙ ==========
-async def safe_send_message(update, text, parse_mode=None):
-    """Безопасная отправка сообщения с обработкой ошибок Markdown"""
-    try:
-        if parse_mode:
-            await update.message.reply_text(text, parse_mode=parse_mode)
-        else:
-            await update.message.reply_text(text)
-    except Exception as e:
-        # Если ошибка парсинга - отправляем без форматирования
-        await update.message.reply_text(text)
-
-async def safe_edit_message(query, text, parse_mode=None):
-    """Безопасное редактирование сообщения с обработкой ошибок Markdown"""
-    try:
-        if parse_mode:
-            await query.edit_message_text(text, parse_mode=parse_mode)
-        else:
-            await query.edit_message_text(text)
-    except Exception as e:
-        # Если ошибка парсинга - отправляем без форматирования
-        await query.edit_message_text(text)
-
-# ========== ФУНКЦИЯ ПРОВЕРКИ ПОДАРКОВ ==========
-async def check_gifts_through_bot(username, api_id, api_hash):
+# ========== ФУНКЦИЯ ПРОВЕРКИ ПОДАРКОВ ЧЕРЕЗ PYROGRAM ==========
+def check_gifts_pyrogram_sync(username, api_id, api_hash):
     """
-    Проверяет количество обычных подарков у пользователя через @GiftBot
+    Синхронная проверка подарков через Pyrogram
     Возвращает: количество обычных подарков или None при ошибке
     """
     try:
-        client = TelegramClient(
+        # Создаем клиент Pyrogram
+        app = Client(
             f"session_{username.replace('@', '')}",
-            api_id,
-            api_hash,
-            system_version="4.16.30-vxCUSTOM"
+            api_id=api_id,
+            api_hash=api_hash,
+            in_memory=True
         )
         
-        await client.connect()
-        
-        if not await client.is_user_authorized():
-            await client.disconnect()
-            return None
+        # Запускаем клиент
+        app.start()
         
         try:
-            gift_bot = await client.get_entity("@GiftBot")
-        except:
-            await client.disconnect()
-            return None
-        
-        await client.send_message(gift_bot, f"/gifts {username}")
-        await asyncio.sleep(6)
-        
-        regular_gifts = 0
-        
-        async for message in client.iter_messages(gift_bot, limit=5):
-            if message.text and username in message.text:
-                numbers = re.findall(r'\d+', message.text)
-                if numbers:
-                    if len(numbers) >= 2:
-                        regular_gifts = int(numbers[1])
-                    else:
-                        regular_gifts = int(numbers[0])
-                break
-        
-        await client.disconnect()
-        return regular_gifts
+            # Получаем пользователя
+            user = app.get_users(username)
+            
+            # Получаем подарки
+            try:
+                gifts = app.get_gifts(user.id)
+            except:
+                gifts = []
+            
+            # Считаем обычные (неулучшенные) подарки
+            regular_gifts = 0
+            if gifts:
+                for gift in gifts:
+                    # Проверяем, улучшен ли подарок
+                    is_upgraded = False
+                    if hasattr(gift, 'is_upgraded'):
+                        is_upgraded = gift.is_upgraded
+                    elif hasattr(gift, 'upgraded'):
+                        is_upgraded = gift.upgraded
+                    elif hasattr(gift, 'upgrade'):
+                        is_upgraded = gift.upgrade
+                    
+                    if not is_upgraded:
+                        regular_gifts += 1
+            
+            # Останавливаем клиент
+            app.stop()
+            
+            return regular_gifts
                 
+        except Exception as e:
+            app.stop()
+            print(f"❌ Ошибка при проверке {username}: {e}")
+            return None
+            
     except Exception as e:
+        print(f"❌ Ошибка при создании клиента для {username}: {e}")
+        return None
+
+# ========== ФУНКЦИЯ ДЛЯ ЗАПУСКА В ОТДЕЛЬНОМ ПОТОКЕ ==========
+def check_gifts_thread(username, api_id, api_hash):
+    """
+    Запускает проверку в отдельном потоке для избежания конфликтов asyncio
+    """
+    try:
+        return check_gifts_pyrogram_sync(username, api_id, api_hash)
+    except Exception as e:
+        print(f"❌ Ошибка в потоке для {username}: {e}")
+        return None
+
+# ========== АСИНХРОННАЯ ОБЕРТКА ДЛЯ ПРОВЕРКИ ==========
+async def check_gifts_async(username, api_id, api_hash):
+    """
+    Асинхронная обертка для запуска синхронной проверки в отдельном потоке
+    """
+    try:
+        # Запускаем синхронную функцию в отдельном потоке
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, 
+            check_gifts_thread, 
+            username, 
+            api_id, 
+            api_hash
+        )
+        return result
+    except Exception as e:
+        print(f"❌ Ошибка при асинхронном запуске {username}: {e}")
         return None
 
 # ========== КОМАНДА /start ==========
@@ -142,25 +162,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "🎁 Бот для проверки обычных подарков\n\n"
-        "Я проверяю аккаунты через @GiftBot.\n\n"
+        "Я проверяю аккаунты напрямую через Telegram API.\n\n"
         "📌 Как пользоваться:\n"
         "1. Нажмите 'Ввести список'\n"
-        "2. Отправьте список в формате:\n"
-        "@username - количество_всех_подарков\n"
-        "Например:\n"
-        "@sirkapirkaw - 1\n"
-        "@sofuuha - 2\n"
+        "2. Отправьте список юзернеймов\n"
         "3. Нажмите 'Начать проверку'\n\n"
-        "⏱ Проверка: ~3-5 сек на аккаунт",
+        "⏱ Проверка: ~2-3 сек на аккаунт",
         reply_markup=reply_markup
     )
 
 # ========== ФУНКЦИЯ ПАРСИНГА СПИСКА ==========
-def parse_accounts_with_gifts(text):
+def parse_accounts(text):
     """
-    Парсит список аккаунтов в формате:
-    @username - число
-    Возвращает список словарей: [{"username": "sirkapirkaw", "total_gifts": 1}, ...]
+    Парсит список аккаунтов
+    Поддерживает форматы:
+    - @username - число
+    - @username
+    - username
     """
     accounts = []
     
@@ -203,13 +221,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['waiting_for_list'] = True
         await query.edit_message_text(
             "📝 Отправьте список аккаунтов\n\n"
-            "Каждый аккаунт с новой строки в формате:\n"
-            "@username - количество_подарков\n\n"
+            "Каждый аккаунт с новой строки.\n"
+            "Формат:\n"
+            "@username - количество_подарков (необязательно)\n\n"
             "Пример:\n"
             "@sirkapirkaw - 1\n"
             "@sofuuha - 2\n"
-            "@nuwxkdr - 1\n\n"
-            "Или просто юзернеймы (без количества).\n"
+            "@nuwxkdr\n\n"
             "Нажмите /cancel чтобы отменить."
         )
     
@@ -228,9 +246,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif action == "start_check":
         if user_id not in user_lists or not user_lists[user_id]:
-            await query.edit_message_text(
-                "❌ Список пуст!\n\nДобавьте аккаунты."
-            )
+            await query.edit_message_text("❌ Список пуст!\n\nДобавьте аккаунты.")
             return
         
         await query.edit_message_text(
@@ -246,7 +262,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username = account['username']
             user_total_gifts = account['total_gifts']
             
-            regular_gifts = await check_gifts_through_bot(username, API_ID, API_HASH)
+            # Проверяем через Pyrogram
+            regular_gifts = await check_gifts_async(username, API_ID, API_HASH)
             
             if regular_gifts is not None:
                 if regular_gifts > 0:
@@ -318,7 +335,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🤖 Что умеет этот бот?\n"
             "Проверяет аккаунты на наличие обычных (неулучшенных) подарков.\n\n"
             "📝 Формат ввода:\n"
-            "@username - количество_всех_подарков\n\n"
+            "@username - количество_всех_подарков (необязательно)\n\n"
             "Пример:\n"
             "@sirkapirkaw - 1\n"
             "@sofuuha - 2\n\n"
@@ -352,7 +369,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
     if context.user_data.get('waiting_for_list'):
-        parsed_accounts = parse_accounts_with_gifts(text)
+        parsed_accounts = parse_accounts(text)
         
         if parsed_accounts:
             if user_id not in user_lists:
@@ -384,7 +401,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ Не найдено аккаунтов в правильном формате\n\n"
                 "Отправьте список в формате:\n"
-                "@username - количество_подарков\n\n"
+                "@username - количество_подарков (необязательно)\n\n"
                 "Пример:\n"
                 "@sirkapirkaw - 1\n"
                 "@sofuuha - 2\n\n"
@@ -430,7 +447,7 @@ async def start_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         username = account['username']
         user_total_gifts = account['total_gifts']
         
-        regular_gifts = await check_gifts_through_bot(username, API_ID, API_HASH)
+        regular_gifts = await check_gifts_async(username, API_ID, API_HASH)
         
         if regular_gifts is not None:
             if regular_gifts > 0:
@@ -502,7 +519,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
     print("🤖 Бот запущен!")
-    print("📝 Проверка через @GiftBot")
+    print("📝 Проверка через Pyrogram (прямое API)")
     print(f"🌐 Веб-сервер доступен по адресу: https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost')}")
     
     try:
