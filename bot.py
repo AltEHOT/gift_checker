@@ -112,6 +112,7 @@ async def check_user_gifts(username):
             await asyncio.sleep(wait_time)
             return await check_user_gifts(username)
         
+        # 1. ПОЛУЧАЕМ ПОЛЬЗОВАТЕЛЯ ПО ЮЗЕРНЕЙМУ
         try:
             entity = await client.get_entity(username)
         except ValueError:
@@ -119,9 +120,12 @@ async def check_user_gifts(username):
         except Exception as e:
             return None, f"Ошибка получения {username}: {e}"
         
+        # 2. ЗАПРАШИВАЕМ ЕГО ПОДАРКИ (ИСПРАВЛЕННЫЙ ВЫЗОВ)
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
                 peer=entity,
+                offset=0,              # ← Добавили offset
+                limit=100,             # ← Добавили limit (максимум подарков)
                 exclude_unsaved=True,
                 exclude_saved=False,
                 exclude_upgradable=False,
@@ -130,6 +134,7 @@ async def check_user_gifts(username):
         except RPCError as e:
             return None, f"Ошибка API: {e}"
         
+        # 3. СЧИТАЕМ НЕУЛУЧШЕННЫЕ
         upgradable_count = 0
         if result and result.gifts:
             for gift in result.gifts:
@@ -226,9 +231,9 @@ async def process_batch_async(event, user_id):
     
     data["status"] = "finished"
 
-# --- ОБРАБОТЧИК СООБЩЕНИЙ (ВСЕ В ОДНОМ ПОТОКЕ) ---
+# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
 async def handle_new_message(event):
-    """Обработчик входящих сообщений (ВСЁ В ОДНОМ ПОТОКЕ)"""
+    """Обработчик входящих сообщений"""
     global client, user_data
     
     try:
@@ -330,7 +335,7 @@ async def handle_new_message(event):
             f"Для статистики: /stats"
         )
         
-        # ← ЗАПУСКАЕМ ПРОВЕРКУ ПРЯМО ЗДЕСЬ (В ТОМ ЖЕ ПОТОКЕ)
+        # Запускаем проверку
         await process_batch_async(event, user_id)
         
     except Exception as e:
