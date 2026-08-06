@@ -59,6 +59,7 @@ app = Flask(__name__)
 user_data = {}
 request_timestamps = []
 client_ready = False
+main_loop = None  # ← ХРАНИМ ГЛАВНЫЙ EVENT LOOP
 
 # --- ЭНДПОИНТЫ ---
 @app.route('/', methods=['GET'])
@@ -165,7 +166,7 @@ async def process_batch_async(event, user_id):
     usernames = data["usernames"]
     total = len(usernames)
     
-    # Отправляем первое сообщение о начале (используем event.reply)
+    # Отправляем первое сообщение о начале
     try:
         await event.reply(f"🚀 Начинаю проверку {total} аккаунтов...")
     except Exception as e:
@@ -231,17 +232,19 @@ async def process_batch_async(event, user_id):
     
     data["status"] = "finished"
 
+# --- НОВАЯ ВЕРСИЯ ЗАПУСКА (без создания нового loop) ---
 def run_batch_sync(event, user_id):
-    """Запускает асинхронную обработку в новом event loop"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(process_batch_async(event, user_id))
-    except Exception as e:
-        logger.error(f"❌ Ошибка в run_batch_sync: {e}")
-        logger.error(traceback.format_exc())
-    finally:
-        loop.close()
+    """Запускает асинхронную обработку в главном event loop"""
+    global main_loop
+    if main_loop is None:
+        logger.error("❌ main_loop не инициализирован!")
+        return
+    
+    # Запускаем корутину в главном loop'е
+    asyncio.run_coroutine_threadsafe(
+        process_batch_async(event, user_id),
+        main_loop
+    )
 
 async def handle_new_message(event):
     """Обработчик входящих сообщений"""
@@ -347,7 +350,7 @@ async def handle_new_message(event):
             f"Для статистики: /stats"
         )
         
-        # Запускаем проверку в отдельном потоке
+        # Запускаем проверку в отдельном потоке (без создания нового loop)
         thread = threading.Thread(
             target=run_batch_sync, 
             args=(event, user_id)
@@ -365,17 +368,17 @@ async def handle_new_message(event):
 
 # --- ЗАПУСК TELEGRAM ---
 def start_telethon():
-    global client_ready
+    global client_ready, main_loop
     
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # СОХРАНЯЕМ ГЛАВНЫЙ LOOP
+    main_loop = asyncio.get_running_loop()
     
     try:
         logger.info("🚀 Запуск Telethon...")
         client.start()
         logger.info("✅ Telethon запущен")
         
-        me = loop.run_until_complete(client.get_me())
+        me = client.get_me()
         logger.info(f"👤 Аккаунт: @{me.username}")
         logger.info(f"📱 ID: {me.id}")
         client_ready = True
