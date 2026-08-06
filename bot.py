@@ -99,12 +99,12 @@ async def check_gifts(username):
             entity = await client.get_entity(username)
         except Exception as e:
             logger.error(f"❌ Ошибка get_entity {username}: {e}")
-            return None, f"Не найден: {str(e)[:30]}"
+            return None, f"Не найден"
         
-        # --- ПРАВИЛЬНЫЙ ВЫЗОВ GetSavedStarGifts ---
+        # --- ИСПРАВЛЕННЫЙ ВЫЗОВ: ПЕРЕДАЕМ ID ---
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
-                peer=entity,
+                peer=entity.id,  # ← ПЕРЕДАЕМ ЧИСЛОВОЙ ID
                 offset=0,
                 limit=100,
                 exclude_unsaved=True,
@@ -143,7 +143,6 @@ def format_report(results, total_time, total_gifts):
     lines.append("✅ **ПРОВЕРКА ЗАВЕРШЕНА!**")
     lines.append("━━━━━━━━━━━━━━━━━")
     
-    # Сортируем: сначала те, у кого есть подарки
     sorted_results = sorted(results, key=lambda x: x[1] if x[1] is not None else -1, reverse=True)
     
     for username, count, error in sorted_results:
