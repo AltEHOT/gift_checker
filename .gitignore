@@ -1,0 +1,7 @@
+echo "*.session
+*.session-journal
+__pycache__/
+*.pyc
+.env
+venv/
+*.log" > .gitignore
