@@ -4,6 +4,7 @@ import time
 import random
 import logging
 import threading
+import asyncio
 from flask import Flask, jsonify
 
 # --- НАСТРОЙКА ЛОГОВ ---
@@ -19,7 +20,6 @@ API_HASH = os.getenv("API_HASH", "")
 SESSION_NAME = "userbot_session"
 PORT = int(os.getenv("PORT", 8080))
 
-# --- ПРОВЕРКА ---
 if not API_ID or not API_HASH:
     logger.error("❌ API_ID и API_HASH не установлены!")
     sys.exit(1)
@@ -33,7 +33,7 @@ request_timestamps = []
 pyro_client = None
 pyro_ready = False
 
-# --- ПРОСТЫЕ ЭНДПОИНТЫ ---
+# --- ЭНДПОИНТЫ ---
 
 @app.route('/', methods=['GET'])
 def index():
@@ -65,7 +65,7 @@ def stats():
         "finished": len([u for u in user_data.values() if u.get("status") == "finished"])
     })
 
-# --- ЛОГИКА PYROGRAM (запускается в отдельном потоке) ---
+# --- ЛОГИКА PYROGRAM ---
 
 def init_pyrogram():
     """Инициализация клиента Pyrogram"""
@@ -287,9 +287,15 @@ def handle_new_message(message_text, chat_id, user_id):
     thread.daemon = True
     thread.start()
 
-def run_pyrogram():
-    """Запуск Pyrogram в отдельном потоке"""
+# --- ЗАПУСК PYROGRAM С EVENT LOOP ---
+
+def start_pyrogram():
+    """Запуск Pyrogram с правильным event loop"""
     global pyro_client, pyro_ready
+    
+    # СОЗДАЕМ EVENT LOOP ВРУЧНУЮ
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
     try:
         pyro_client = init_pyrogram()
@@ -314,6 +320,7 @@ def run_pyrogram():
                     message.from_user.id
                 )
         
+        # БЛОКИРУЕМ ПОТОК
         pyro_client.idle()
         
     except Exception as e:
@@ -326,10 +333,12 @@ if __name__ == "__main__":
     logger.info("🚀 Запуск сервиса...")
     
     # Запускаем Pyrogram в фоне
-    pyro_thread = threading.Thread(target=run_pyrogram, daemon=True)
+    pyro_thread = threading.Thread(target=start_pyrogram, daemon=True)
     pyro_thread.start()
     
-    # Ждем 2 секунды и запускаем Flask
-    time.sleep(2)
+    # Даем время на инициализацию
+    time.sleep(3)
     logger.info(f"🌐 Запуск Flask на порту {PORT}")
+    
+    # Запускаем Flask
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
