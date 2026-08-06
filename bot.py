@@ -59,6 +59,7 @@ app = Flask(__name__)
 user_data = {}
 request_timestamps = []
 client_ready = False
+main_loop = None  # ← БУДЕМ ХРАНИТЬ ГЛАВНЫЙ LOOP
 
 # --- ЭНДПОИНТЫ ---
 @app.route('/', methods=['GET'])
@@ -97,14 +98,11 @@ async def get_entity_safe(user_id):
     """Безопасно получает entity пользователя"""
     global client
     try:
-        # Пробуем получить напрямую
         return await client.get_entity(user_id)
     except Exception as e:
         logger.warning(f"⚠️ Не могу получить entity напрямую: {e}")
-        # Загружаем диалоги и пробуем снова
-        logger.info("🔄 Загружаю диалоги...")
-        await client.get_dialogs()
         try:
+            await client.get_dialogs()
             return await client.get_entity(user_id)
         except Exception as e2:
             logger.error(f"❌ Не могу найти пользователя {user_id}: {e2}")
@@ -131,7 +129,6 @@ async def check_user_gifts(username):
             await asyncio.sleep(wait_time)
             return await check_user_gifts(username)
         
-        # 1. ПОЛУЧАЕМ ПОЛЬЗОВАТЕЛЯ ПО ЮЗЕРНЕЙМУ
         try:
             entity = await client.get_entity(username)
         except ValueError:
@@ -139,7 +136,6 @@ async def check_user_gifts(username):
         except Exception as e:
             return None, f"Ошибка получения {username}: {e}"
         
-        # 2. ЗАПРАШИВАЕМ ЕГО ПОДАРКИ
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
                 peer=entity,
@@ -151,7 +147,6 @@ async def check_user_gifts(username):
         except RPCError as e:
             return None, f"Ошибка API: {e}"
         
-        # 3. СЧИТАЕМ НЕУЛУЧШЕННЫЕ (can_upgrade = True)
         upgradable_count = 0
         if result and result.gifts:
             for gift in result.gifts:
@@ -242,21 +237,25 @@ async def process_batch_async(entity, user_id):
     
     data["status"] = "finished"
 
+# ← ЭТО ИЗМЕНЕНО — ИСПОЛЬЗУЕМ ГЛОБАЛЬНЫЙ LOOP
 def run_batch_sync(entity, user_id):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(process_batch_async(entity, user_id))
-    except Exception as e:
-        logger.error(f"❌ Ошибка в run_batch_sync: {e}")
-        logger.error(traceback.format_exc())
+    """Запускает асинхронную обработку в главном event loop"""
+    global main_loop
+    if main_loop is None:
+        logger.error("❌ main_loop не инициализирован!")
+        return
+    
+    # Запускаем корутину в главном loop'е
+    asyncio.run_coroutine_threadsafe(
+        process_batch_async(entity, user_id),
+        main_loop
+    )
 
 async def handle_new_message(event):
     """Обработчик входящих сообщений"""
     global client, user_data
     
     try:
-        # Только личные сообщения
         if not event.is_private:
             return
         
@@ -269,11 +268,9 @@ async def handle_new_message(event):
         
         logger.info(f"📩 Сообщение от {user_id}: {text[:50]}...")
         
-        # --- ПОЛУЧАЕМ ENTITY ПОЛЬЗОВАТЕЛЯ ---
         entity = await get_entity_safe(user_id)
         if not entity:
             logger.error(f"❌ Не могу найти entity для {user_id}")
-            # Пробуем отправить по chat_id (на всякий случай)
             try:
                 await client.send_message(chat_id, "❌ Ошибка идентификации, попробуй еще раз")
             except:
@@ -374,12 +371,11 @@ async def handle_new_message(event):
             f"Для статистики: /stats"
         )
         
-        thread = threading.Thread(
-            target=run_batch_sync, 
-            args=(entity, user_id)
+        # ← ЗАПУСКАЕМ В ГЛАВНОМ LOOP (БЕЗ НОВОГО ПОТОКА)
+        asyncio.run_coroutine_threadsafe(
+            process_batch_async(entity, user_id),
+            main_loop
         )
-        thread.daemon = True
-        thread.start()
         
     except Exception as e:
         logger.error(f"❌ Ошибка в handle_new_message: {e}")
@@ -394,22 +390,22 @@ async def handle_new_message(event):
 
 # --- ЗАПУСК TELEGRAM ---
 def start_telethon():
-    global client_ready
+    global client_ready, main_loop
     
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # ← СОХРАНЯЕМ ГЛАВНЫЙ LOOP
+    main_loop = asyncio.get_running_loop()
     
     try:
         logger.info("🚀 Запуск Telethon...")
         client.start()
         logger.info("✅ Telethon запущен")
         
-        # Загружаем диалоги при старте
         logger.info("🔄 Загружаю диалоги...")
-        dialogs = loop.run_until_complete(client.get_dialogs())
+        # Используем main_loop для синхронного вызова
+        dialogs = asyncio.run_coroutine_threadsafe(client.get_dialogs(), main_loop).result()
         logger.info(f"✅ Загружено {len(dialogs)} диалогов")
         
-        me = loop.run_until_complete(client.get_me())
+        me = asyncio.run_coroutine_threadsafe(client.get_me(), main_loop).result()
         logger.info(f"👤 Аккаунт: @{me.username}")
         logger.info(f"📱 ID: {me.id}")
         client_ready = True
