@@ -76,7 +76,6 @@ def health():
 
 # --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ, ЧТО ЭТО ЮЗЕРНЕЙМ ---
 def is_valid_username(text):
-    """Проверяет, что текст похож на юзернейм"""
     if not text or not isinstance(text, str):
         return False
     text = text.strip()
@@ -84,7 +83,6 @@ def is_valid_username(text):
 
 # --- ПРОВЕРКА ПОДАРКОВ ---
 async def check_gifts(username):
-    """Проверяет неулучшенные подарки у пользователя"""
     global client, request_timestamps
     
     try:
@@ -100,8 +98,10 @@ async def check_gifts(username):
         try:
             entity = await client.get_entity(username)
         except Exception as e:
-            return None, f"Не найден"
+            logger.error(f"❌ Ошибка get_entity {username}: {e}")
+            return None, f"Не найден: {str(e)[:30]}"
         
+        # --- ПРАВИЛЬНЫЙ ВЫЗОВ GetSavedStarGifts ---
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
                 peer=entity,
@@ -113,11 +113,15 @@ async def check_gifts(username):
                 exclude_unupgradable=True
             ))
         except FloodWaitError as e:
-            await asyncio.sleep(e.seconds + 1)
+            wait = e.seconds
+            logger.warning(f"⏳ FloodWait {wait} сек для {username}")
+            await asyncio.sleep(wait + 1)
             return await check_gifts(username)
         except Exception as e:
-            return None, f"Ошибка API"
+            logger.error(f"❌ Ошибка GetSavedStarGifts для {username}: {e}")
+            return None, f"Ошибка API: {str(e)[:50]}"
         
+        # Считаем неулучшенные (can_upgrade == True)
         count = 0
         if result and result.gifts:
             for gift in result.gifts:
@@ -125,15 +129,16 @@ async def check_gifts(username):
                     count += 1
         
         request_timestamps.append(time.time())
+        logger.info(f"✅ {username}: {count} подарков")
         return count, None
         
     except Exception as e:
-        logger.error(f"❌ Ошибка {username}: {e}")
-        return None, str(e)[:30]
+        logger.error(f"❌ Ошибка проверки {username}: {e}")
+        logger.error(traceback.format_exc())
+        return None, str(e)[:50]
 
 # --- ФУНКЦИЯ ДЛЯ ФОРМИРОВАНИЯ ОТЧЕТА ---
 def format_report(results, total_time, total_gifts):
-    """Формирует красивый отчет из результатов"""
     lines = []
     lines.append("✅ **ПРОВЕРКА ЗАВЕРШЕНА!**")
     lines.append("━━━━━━━━━━━━━━━━━")
@@ -254,7 +259,7 @@ async def handler(event):
             "status": "active",
             "start_time": time.time(),
             "total_gifts": 0,
-            "results": []  # ← БУДЕМ СОБИРАТЬ РЕЗУЛЬТАТЫ
+            "results": []
         }
         
         await event.reply(
@@ -279,13 +284,11 @@ async def handler(event):
                 await event.reply(f"⏸️ Пауза 30 сек ({index}/{total})")
                 await asyncio.sleep(30)
             
-            # Показываем прогресс (одно сообщение, обновляем прогресс)
             if index % 10 == 0 or index == total - 1:
                 await event.reply(f"⏳ {index + 1}/{total} - проверяю...")
             
             count, error = await check_gifts(username)
             
-            # СОХРАНЯЕМ РЕЗУЛЬТАТ
             if error:
                 results.append((username, None, error))
             else:
@@ -300,7 +303,6 @@ async def handler(event):
             total_time = int(time.time() - data["start_time"])
             report = format_report(results, total_time, data.get('total_gifts', 0))
             
-            # Разбиваем отчет на части, если он слишком длинный (Telegram лимит 4096)
             if len(report) > 4000:
                 parts = [report[i:i+4000] for i in range(0, len(report), 4000)]
                 for part in parts:
@@ -318,7 +320,7 @@ async def handler(event):
         await asyncio.sleep(wait + 1)
         await handler(event)
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка в handler: {e}")
         logger.error(traceback.format_exc())
         try:
             await event.reply(f"❌ Ошибка: {str(e)[:100]}")
