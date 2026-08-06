@@ -106,7 +106,7 @@ async def check_gifts(username):
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
                 peer=input_peer,
-                offset=0,
+                offset="",
                 limit=100,
                 exclude_unsaved=True,
                 exclude_saved=False,
