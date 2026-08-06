@@ -102,30 +102,53 @@ def can_make_request():
         return False, wait_time
     return True, 0
 
+async def safe_send_message(chat, text, retry_count=0):
+    """Безопасная отправка сообщения с обработкой FloodWait"""
+    try:
+        await client.send_message(chat, text)
+        return True
+    except FloodWaitError as e:
+        wait_time = e.seconds
+        logger.warning(f"⏳ FloodWait при отправке: {wait_time} сек")
+        if retry_count < 3:
+            await asyncio.sleep(wait_time + 1)
+            return await safe_send_message(chat, text, retry_count + 1)
+        else:
+            logger.error(f"❌ Превышено количество попыток отправки")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки: {e}")
+        return False
+
 async def check_user_gifts(username):
     """Проверяет НЕУЛУЧШЕННЫЕ подарки у пользователя по @username"""
     global client, request_timestamps
     
     try:
+        # ПРОВЕРЯЕМ, ЧТО USERNAME — ЭТО СТРОКА
+        if not isinstance(username, str):
+            logger.warning(f"⚠️ Пропускаем {username} (не строка)")
+            return None, "Неверный формат username"
+        
         can_request, wait_time = can_make_request()
         if not can_request:
             await asyncio.sleep(wait_time)
             return await check_user_gifts(username)
         
-        # 1. УБИРАЕМ @ ИЗ ЮЗЕРНЕЙМА (если есть)
+        # 1. УБИРАЕМ @ ИЗ ЮЗЕРНЕЙМА
         clean_username = username
         if clean_username.startswith('@'):
             clean_username = clean_username[1:]
         
         logger.info(f"🔍 Ищу пользователя: {clean_username}")
         
-        # 2. ПОЛУЧАЕМ ПОЛЬЗОВАТЕЛЯ ПО ЮЗЕРНЕЙМУ (БЕЗ @)
+        # 2. ПОЛУЧАЕМ ПОЛЬЗОВАТЕЛЯ ПО ЮЗЕРНЕЙМУ
         try:
             entity = await client.get_entity(clean_username)
         except ValueError as e:
-            return None, f"Пользователь @{clean_username} не найден: {e}"
+            return None, f"Пользователь @{clean_username} не найден"
         except Exception as e:
-            return None, f"Ошибка получения @{clean_username}: {e}"
+            return None, f"Ошибка получения @{clean_username}: {str(e)[:50]}"
         
         # 3. ЗАПРАШИВАЕМ ЕГО ПОДАРКИ
         try:
@@ -138,8 +161,13 @@ async def check_user_gifts(username):
                 exclude_upgradable=False,
                 exclude_unupgradable=True
             ))
+        except FloodWaitError as e:
+            wait_time = e.seconds
+            logger.warning(f"⏳ FloodWait для {username}: {wait_time} сек")
+            await asyncio.sleep(wait_time + 1)
+            return await check_user_gifts(username)
         except RPCError as e:
-            return None, f"Ошибка API: {e}"
+            return None, f"Ошибка API: {str(e)[:50]}"
         
         # 4. СЧИТАЕМ НЕУЛУЧШЕННЫЕ
         upgradable_count = 0
@@ -150,14 +178,6 @@ async def check_user_gifts(username):
         
         request_timestamps.append(time.time())
         return upgradable_count, None
-        
-    except FloodWaitError as e:
-        wait_time = e.seconds
-        logger.warning(f"⏳ FloodWait: {wait_time} сек для {username}")
-        await asyncio.sleep(min(wait_time, 60))
-        if wait_time < 60:
-            return await check_user_gifts(username)
-        return None, f"FloodWait: {wait_time} сек"
         
     except Exception as e:
         logger.error(f"❌ Ошибка проверки {username}: {e}")
@@ -174,71 +194,54 @@ async def process_batch_async(event, user_id):
     usernames = data["usernames"]
     total = len(usernames)
     
-    try:
-        await event.reply(f"🚀 Начинаю проверку {total} аккаунтов...")
-    except Exception as e:
-        logger.error(f"❌ Не могу отправить стартовое: {e}")
+    await safe_send_message(event.chat_id, f"🚀 Начинаю проверку {total} аккаунтов...")
     
     for index, username in enumerate(usernames):
         if data.get("status") == "stopped":
-            await event.reply("⏹️ Проверка остановлена.")
+            await safe_send_message(event.chat_id, "⏹️ Проверка остановлена.")
             break
         
         data["index"] = index
         
         if index > 0 and index % 50 == 0:
-            try:
-                await event.reply(f"⏸️ Пауза 30 сек (обработано {index}/{total})")
-            except:
-                pass
+            await safe_send_message(event.chat_id, f"⏸️ Пауза 30 сек (обработано {index}/{total})")
             await asyncio.sleep(30)
         
-        try:
-            await event.reply(f"⏳ {index + 1}/{total} - Проверяю {username}...")
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки прогресса: {e}")
+        # ПРОВЕРЯЕМ, ЧТО USERNAME НЕ ПУСТОЙ
+        if not username or not isinstance(username, str):
+            logger.warning(f"⚠️ Пропускаем пустой username: {username}")
+            continue
+        
+        await safe_send_message(event.chat_id, f"⏳ {index + 1}/{total} - Проверяю {username}...")
         
         result, error = await check_user_gifts(username)
         
         if error:
-            try:
-                await event.reply(f"❌ **{username}**\n{error}")
-            except:
-                pass
+            await safe_send_message(event.chat_id, f"❌ **{username}**\n{error}")
         else:
-            try:
-                if result > 0:
-                    data['total_gifts'] = data.get('total_gifts', 0) + result
-                    await event.reply(
-                        f"✅ **{username}**\n📦 Неулучшенных подарков: **{result}**"
-                    )
-                else:
-                    await event.reply(
-                        f"ℹ️ **{username}**\n📦 Неулучшенных подарков: **0**"
-                    )
-            except Exception as e:
-                logger.error(f"❌ Ошибка отправки результата: {e}")
+            if result > 0:
+                data['total_gifts'] = data.get('total_gifts', 0) + result
+                await safe_send_message(event.chat_id, f"✅ **{username}**\n📦 Неулучшенных подарков: **{result}**")
+            else:
+                await safe_send_message(event.chat_id, f"ℹ️ **{username}**\n📦 Неулучшенных подарков: **0**")
         
         await asyncio.sleep(random.uniform(2, 5))
     
     if data.get("status") != "stopped":
         total_time = int(time.time() - data["start_time"])
         avg_time = total_time / total if total > 0 else 0
-        try:
-            await event.reply(
-                f"✅ **Проверка завершена!**\n"
-                f"━━━━━━━━━━━━━━━━━\n"
-                f"📊 Всего проверено: **{total}** аккаунтов\n"
-                f"⏱ Время: **{total_time}** сек\n"
-                f"📈 Среднее: **{avg_time:.1f}** сек/аккаунт\n"
-                f"🎁 Найдено неулучшенных подарков: **{data.get('total_gifts', 0)}**"
-            )
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки финала: {e}")
+        await safe_send_message(
+            event.chat_id,
+            f"✅ **Проверка завершена!**\n"
+            f"━━━━━━━━━━━━━━━━━\n"
+            f"📊 Всего проверено: **{total}** аккаунтов\n"
+            f"⏱ Время: **{total_time}** сек\n"
+            f"📈 Среднее: **{avg_time:.1f}** сек/аккаунт\n"
+            f"🎁 Найдено неулучшенных подарков: **{data.get('total_gifts', 0)}**"
+        )
     
     data["status"] = "finished"
 
-# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
 async def handle_new_message(event):
     """Обработчик входящих сообщений"""
     global client, user_data
@@ -260,7 +263,7 @@ async def handle_new_message(event):
             if text.lower() in ["/stop", "стоп"]:
                 if user_id in user_data:
                     user_data[user_id]["status"] = "stopped"
-                    await event.reply("⏹️ Проверка остановлена.")
+                    await safe_send_message(event.chat_id, "⏹️ Проверка остановлена.")
                 return
             
             if text.lower() in ["/stats", "статистика"]:
@@ -268,15 +271,17 @@ async def handle_new_message(event):
                     data = user_data[user_id]
                     total = len(data["usernames"])
                     current = data.get("index", 0)
-                    await event.reply(
+                    await safe_send_message(
+                        event.chat_id,
                         f"📊 **Прогресс:** {current}/{total}\n🎁 Найдено: {data.get('total_gifts', 0)}"
                     )
                 else:
-                    await event.reply("ℹ️ Нет активной проверки.")
+                    await safe_send_message(event.chat_id, "ℹ️ Нет активной проверки.")
                 return
             
             if text.lower() in ["/help", "помощь"]:
-                await event.reply(
+                await safe_send_message(
+                    event.chat_id,
                     "🤖 **Помощь**\n\n"
                     "Отправь список @username для проверки\n"
                     "Формат: @username1 - 1\n\n"
@@ -291,7 +296,8 @@ async def handle_new_message(event):
         # --- ПАРСИНГ СПИСКА ---
         if user_id in user_data and user_data[user_id].get("status") == "active":
             data = user_data[user_id]
-            await event.reply(
+            await safe_send_message(
+                event.chat_id,
                 f"⏳ Уже идет проверка: {data['index']}/{len(data['usernames'])}"
             )
             return
@@ -306,11 +312,12 @@ async def handle_new_message(event):
                         break
                 else:
                     username = line.strip()
-                if username.startswith('@'):
+                if username.startswith('@') and len(username) > 1:
                     usernames.append(username)
         
         if not usernames:
-            await event.reply(
+            await safe_send_message(
+                event.chat_id,
                 "❌ Не найдено @username\n\n"
                 "Отправь список в формате:\n"
                 "@username1 - 1\n"
@@ -319,7 +326,8 @@ async def handle_new_message(event):
             return
         
         if len(usernames) > 200:
-            await event.reply(
+            await safe_send_message(
+                event.chat_id,
                 f"⚠️ Слишком много аккаунтов ({len(usernames)})\n"
                 f"Максимум: 200 за раз"
             )
@@ -333,7 +341,8 @@ async def handle_new_message(event):
             "total_gifts": 0
         }
         
-        await event.reply(
+        await safe_send_message(
+            event.chat_id,
             f"✅ Получено {len(usernames)} аккаунтов.\n"
             f"⏱ Примерное время: ~{len(usernames) * 3} сек\n"
             f"🛡️ Защита от флуда: ВКЛ\n"
@@ -349,7 +358,7 @@ async def handle_new_message(event):
         logger.error(f"❌ Ошибка в handle_new_message: {e}")
         logger.error(traceback.format_exc())
         try:
-            await event.reply(f"❌ Внутренняя ошибка: {str(e)[:100]}")
+            await safe_send_message(event.chat_id, f"❌ Внутренняя ошибка: {str(e)[:100]}")
         except:
             pass
 
