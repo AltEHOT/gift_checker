@@ -8,7 +8,7 @@ import base64
 import traceback
 import re
 from flask import Flask, jsonify
-from telethon import TelegramClient, events, functions, types
+from telethon import TelegramClient, events, functions
 from telethon.errors import FloodWaitError, RPCError
 from telethon.sessions import StringSession
 
@@ -31,187 +31,335 @@ if not API_ID or not API_HASH:
 
 # --- ПОДГОТОВКА СЕССИИ ---
 if SESSION_STRING and SESSION_STRING not in ["None", "NONE", "none", ""]:
+    logger.info("🔑 Использую StringSession")
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+elif os.path.exists("session.b64"):
+    logger.info("📁 Декодирую session.b64...")
+    try:
+        with open("session.b64", "r") as f:
+            b64_data = f.read().strip()
+        with open("userbot_session.session", "wb") as f:
+            f.write(base64.b64decode(b64_data))
+        logger.info("✅ Сессия декодирована")
+        client = TelegramClient("userbot_session", API_ID, API_HASH)
+    except Exception as e:
+        logger.error(f"❌ Ошибка декодирования: {e}")
+        sys.exit(1)
 elif os.path.exists("userbot_session.session"):
+    logger.info("📁 Использую файл сессии")
     client = TelegramClient("userbot_session", API_ID, API_HASH)
 else:
     logger.error("❌ Не найдена сессия!")
     sys.exit(1)
 
+# --- FLASK ---
 app = Flask(__name__)
+
+# --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 user_data = {}
+request_timestamps = []
 client_ready = False
 
-@app.route('/')
+# --- ЭНДПОИНТЫ ---
+@app.route('/', methods=['GET'])
 def index():
-    return jsonify({"status": "running", "client_ready": client_ready})
+    return jsonify({
+        "status": "running",
+        "service": "Gift Checker",
+        "client_ready": client_ready,
+        "active_checks": len([u for u in user_data.values() if u.get("status") == "active"])
+    })
 
-@app.route('/health')
+@app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "alive"}), 200
+    return jsonify({"status": "alive", "client_ready": client_ready}), 200
 
+# --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ, ЧТО ЭТО ЮЗЕРНЕЙМ ---
 def is_valid_username(text):
     if not text or not isinstance(text, str):
         return False
     text = text.strip()
     return re.match(r'^@[A-Za-z0-9_]{3,}$', text) is not None
 
-# --- ПРОВЕРКА ПОДАРКОВ ---
+# --- ПРОВЕРКА ПОДАРКОВ (ИСПРАВЛЕННАЯ) ---
 async def check_gifts(username):
+    global client, request_timestamps
+    
     try:
         username = str(username).strip()
         if username.startswith('@'):
             username = username[1:]
         
         if not username or username.isdigit():
-            return None, "Невалидный юзернейм"
+            return None, "Невалидный username"
         
-        # Получаем объект пользователя
+        logger.info(f"🔍 Проверяю: {username}")
+        
+        # --- ПОЛУЧАЕМ InputPeer (ГАРАНТИРОВАННО РАБОТАЕТ) ---
         try:
             input_peer = await client.get_input_entity(username)
-        except Exception:
-            return None, "Не найден / скрыт"
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения {username}: {e}")
+            return None, f"Не найден"
         
-        # Запрос списка звездных подарков
-        # exclude_unsaved=False позволяет видеть даже те подарки, которые НЕ закреплены в профиле
+        # --- ПРАВИЛЬНЫЙ ВЫЗОВ ---
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
                 peer=input_peer,
-                offset="", 
+                offset="",
                 limit=100,
-                exclude_unsaved=False,   # Важно: искать везде
+                exclude_unsaved=False,
                 exclude_saved=False,
-                exclude_upgradable=False, # Нам нужны те, которые можно улучшить
-                exclude_unupgradable=True # Игнорируем те, которые улучшить нельзя
+                exclude_upgradable=False,
+                exclude_unupgradable=True
             ))
         except FloodWaitError as e:
-            logger.warning(f"⏳ FloodWait {e.seconds} сек")
-            await asyncio.sleep(e.seconds + 1)
+            wait = e.seconds
+            logger.warning(f"⏳ FloodWait {wait} сек для {username}")
+            await asyncio.sleep(wait + 1)
             return await check_gifts(username)
         except Exception as e:
-            return None, f"Ошибка API: {str(e)[:30]}"
+            logger.error(f"❌ Ошибка GetSavedStarGifts для {username}: {e}")
+            return None, f"Ошибка API: {str(e)[:50]}"
         
+        # Считаем неулучшенные
         count = 0
-        if result and hasattr(result, 'gifts'):
-            for saved_gift in result.gifts:
-                # Проверяем, можно ли улучшить этот конкретный подарок
-                # В структуре UserStarGift поле can_upgrade указывает на возможность улучшения
-                if getattr(saved_gift, 'can_upgrade', False):
+        if result and result.gifts:
+            for gift in result.gifts:
+                if gift.can_upgrade:
                     count += 1
         
+        request_timestamps.append(time.time())
+        logger.info(f"✅ {username}: {count} подарков")
         return count, None
         
     except Exception as e:
-        logger.error(f"Ошибка на {username}: {e}")
-        return None, "Системная ошибка"
+        logger.error(f"❌ Ошибка проверки {username}: {e}")
+        logger.error(traceback.format_exc())
+        return None, str(e)[:50]
 
+# --- ФУНКЦИЯ ДЛЯ ФОРМИРОВАНИЯ ОТЧЕТА ---
 def format_report(results, total_time, total_gifts):
-    lines = ["✅ **ОТЧЕТ ПО ПОДАРКАМ**", "━━━━━━━━━━━━━━━━━"]
-    # Сортировка: сначала те, у кого больше подарков
-    sorted_res = sorted(results, key=lambda x: x[1] if x[1] is not None else -1, reverse=True)
+    lines = []
+    lines.append("✅ **ПРОВЕРКА ЗАВЕРШЕНА!**")
+    lines.append("━━━━━━━━━━━━━━━━━")
     
-    for user, count, err in sorted_res:
-        if err:
-            lines.append(f"❌ @{user}: {err}")
+    sorted_results = sorted(results, key=lambda x: x[1] if x[1] is not None else -1, reverse=True)
+    
+    for username, count, error in sorted_results:
+        if error:
+            lines.append(f"❌ {username}: {error}")
+        elif count is None:
+            lines.append(f"❌ {username}: ошибка")
         elif count > 0:
-            lines.append(f"🎁 @{user}: **{count}** неулучшенных")
+            lines.append(f"✅ {username}: **{count}** 🎁")
         else:
-            lines.append(f"ℹ️ @{user}: 0")
+            lines.append(f"ℹ️ {username}: 0")
     
     lines.append("━━━━━━━━━━━━━━━━━")
-    lines.append(f"📊 Аккаунтов: {len(results)} | Найдено: {total_gifts}")
-    lines.append(f"⏱ Время: {total_time} сек")
+    lines.append(f"📊 Всего проверено: **{len(results)}** аккаунтов")
+    lines.append(f"⏱ Время: **{total_time}** сек")
+    lines.append(f"🎁 Найдено подарков: **{total_gifts}**")
+    
     return "\n".join(lines)
 
-@client.on(events.NewMessage(incoming=True))
+# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
+@client.on(events.NewMessage)
 async def handler(event):
-    if not event.is_private: return
-    user_id = event.sender_id
-    text = event.message.text
-    if not text: return
-
-    # Простая обработка команд
-    if text.startswith('/'):
-        cmd = text.lower()
-        if cmd == '/start':
-            await event.reply("Привет! Пришли мне список @юзернеймов (каждый с новой строки).")
-        elif cmd == '/stop':
-            if user_id in user_data:
-                user_data[user_id]['status'] = 'stopped'
-        return
-
-    # Если уже идет процесс
-    if user_id in user_data and user_data[user_id].get('status') == 'active':
-        await event.reply("⏳ Пожалуйста, дождитесь завершения текущей проверки.")
-        return
-
-    # Парсинг юзернеймов
-    lines = text.strip().split('\n')
-    usernames = []
-    for line in lines:
-        match = re.search(r'@[A-Za-z0-9_]{3,}', line)
-        if match:
-            usernames.append(match.group(0))
-
-    if not usernames:
-        await event.reply("❌ В сообщении не найдено @юзернеймов.")
-        return
-
-    user_data[user_id] = {
-        'status': 'active',
-        'start_time': time.time(),
-        'total_gifts': 0
-    }
-
-    status_msg = await event.reply(f"🚀 Начинаю проверку {len(usernames)} профилей...")
+    global user_data
     
-    results = []
-    total_found = 0
-
-    for i, uname in enumerate(usernames):
-        if user_data[user_id].get('status') == 'stopped':
-            break
+    try:
+        if not event.is_private:
+            return
         
-        # Обновление статуса каждые 5 проверок
-        if i > 0 and i % 5 == 0:
-            try:
-                await status_msg.edit(f"⏳ Прогресс: {i}/{len(usernames)}...")
-            except: pass
-
-        count, error = await check_gifts(uname)
+        user_id = event.sender_id
+        text = event.message.text
         
-        if count is not None:
-            total_found += count
-            results.append((uname.replace('@', ''), count, None))
+        if not text:
+            return
+        
+        logger.info(f"📩 Сообщение от {user_id}")
+        
+        # --- КОМАНДЫ ---
+        if text.startswith('/'):
+            if text.lower() in ["/stop", "стоп"]:
+                if user_id in user_data:
+                    user_data[user_id]["status"] = "stopped"
+                    await event.reply("⏹️ Остановлено.")
+                return
+            
+            if text.lower() in ["/stats", "статистика"]:
+                if user_id in user_data and user_data[user_id].get("status") == "active":
+                    data = user_data[user_id]
+                    total = len(data["usernames"])
+                    current = data.get("index", 0)
+                    await event.reply(
+                        f"📊 Прогресс: {current}/{total}\n"
+                        f"🎁 Найдено: {data.get('total_gifts', 0)}"
+                    )
+                else:
+                    await event.reply("ℹ️ Нет активной проверки.")
+                return
+            
+            if text.lower() in ["/help", "помощь"]:
+                await event.reply(
+                    "🤖 **Помощь**\n\n"
+                    "Отправь список @username\n"
+                    "Например:\n"
+                    "@sirkapirkaw - 1\n"
+                    "@sofuuha - 2\n\n"
+                    "Команды:\n"
+                    "/stop - остановить\n"
+                    "/stats - прогресс"
+                )
+                return
+            return
+        
+        # --- ПАРСИНГ СПИСКА ---
+        if user_id in user_data and user_data[user_id].get("status") == "active":
+            data = user_data[user_id]
+            await event.reply(
+                f"⏳ Уже идет проверка: {data['index']}/{len(data['usernames'])}"
+            )
+            return
+        
+        lines = text.strip().split('\n')
+        usernames = []
+        for line in lines:
+            if '@' in line:
+                for sep in [' - ', '—', ' -', '- ', '\t', ' ']:
+                    if sep in line:
+                        username = line.split(sep)[0].strip()
+                        break
+                else:
+                    username = line.strip()
+                
+                if is_valid_username(username):
+                    usernames.append(username)
+        
+        if not usernames:
+            await event.reply(
+                "❌ Не найдено @username\n\n"
+                "Отправь список:\n"
+                "@username1 - 1\n"
+                "@username2 - 2"
+            )
+            return
+        
+        if len(usernames) > 200:
+            await event.reply(
+                f"⚠️ Слишком много ({len(usernames)}). Максимум 200."
+            )
+            return
+        
+        # Сохраняем данные
+        user_data[user_id] = {
+            "usernames": usernames,
+            "index": 0,
+            "status": "active",
+            "start_time": time.time(),
+            "total_gifts": 0,
+            "results": []
+        }
+        
+        await event.reply(
+            f"✅ Получено {len(usernames)} аккаунтов.\n"
+            f"⏱ ~{len(usernames) * 3} сек\n"
+            f"Команда /stop для остановки"
+        )
+        
+        # --- ЗАПУСК ПРОВЕРКИ ---
+        data = user_data[user_id]
+        total = len(usernames)
+        results = []
+        
+        for index, username in enumerate(usernames):
+            if data.get("status") == "stopped":
+                await event.reply("⏹️ Остановлено.")
+                break
+            
+            data["index"] = index
+            
+            if index > 0 and index % 50 == 0:
+                await event.reply(f"⏸️ Пауза 30 сек ({index}/{total})")
+                await asyncio.sleep(30)
+            
+            if index % 10 == 0 or index == total - 1:
+                await event.reply(f"⏳ {index + 1}/{total} - проверяю...")
+            
+            count, error = await check_gifts(username)
+            
+            if error:
+                results.append((username, None, error))
+            else:
+                if count and count > 0:
+                    data['total_gifts'] = data.get('total_gifts', 0) + count
+                results.append((username, count, None))
+            
+            await asyncio.sleep(random.uniform(2, 4))
+        
+        # --- ОТПРАВЛЯЕМ ФИНАЛЬНЫЙ ОТЧЕТ ---
+        if data.get("status") != "stopped":
+            total_time = int(time.time() - data["start_time"])
+            report = format_report(results, total_time, data.get('total_gifts', 0))
+            
+            if len(report) > 4000:
+                parts = [report[i:i+4000] for i in range(0, len(report), 4000)]
+                for part in parts:
+                    await event.reply(part)
+            else:
+                await event.reply(report)
         else:
-            results.append((uname.replace('@', ''), None, error))
+            await event.reply("⏹️ Проверка остановлена.")
         
-        # Задержка, чтобы не поймать бан
-        await asyncio.sleep(random.uniform(1.5, 3.0))
+        data["status"] = "finished"
+        
+    except FloodWaitError as e:
+        wait = e.seconds
+        logger.warning(f"⏳ FloodWait: {wait} сек")
+        await asyncio.sleep(wait + 1)
+        await handler(event)
+    except Exception as e:
+        logger.error(f"❌ Ошибка в handler: {e}")
+        logger.error(traceback.format_exc())
+        try:
+            await event.reply(f"❌ Ошибка: {str(e)[:100]}")
+        except:
+            pass
 
-    report = format_report(results, int(time.time() - user_data[user_id]['start_time']), total_found)
-    user_data[user_id]['status'] = 'finished'
-    
-    # Отправка отчета частями, если он длинный
-    if len(report) > 4000:
-        for x in range(0, len(report), 4000):
-            await event.respond(report[x:x+4000])
-    else:
-        await event.respond(report)
-
-def start_bot():
+# --- ЗАПУСК ---
+def start_telethon():
     global client_ready
+    
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    
     try:
+        logger.info("🚀 Запуск Telethon...")
         client.start()
+        logger.info("✅ Telethon запущен")
+        
+        me = loop.run_until_complete(client.get_me())
+        logger.info(f"👤 Аккаунт: @{me.username}")
         client_ready = True
-        logger.info("✅ Юзербот запущен!")
+        
         client.run_until_disconnected()
+        
     except Exception as e:
-        logger.error(f"Ошибка запуска: {e}")
+        logger.error(f"❌ Ошибка Telethon: {e}")
+        logger.error(traceback.format_exc())
+        client_ready = False
 
+# --- ГЛАВНЫЙ ЗАПУСК ---
 if __name__ == "__main__":
+    logger.info("=" * 60)
+    logger.info("🚀 ЗАПУСК ЮЗЕРБОТА")
+    logger.info("=" * 60)
+    
     import threading
-    threading.Thread(target=start_bot, daemon=True).start()
-    app.run(host='0.0.0.0', port=PORT)
+    telethon_thread = threading.Thread(target=start_telethon, daemon=True)
+    telethon_thread.start()
+    
+    time.sleep(3)
+    logger.info(f"🌐 Flask на порту {PORT}")
+    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
