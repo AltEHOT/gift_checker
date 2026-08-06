@@ -5,9 +5,11 @@ import random
 import logging
 import threading
 import asyncio
+import base64
 from flask import Flask, jsonify
-from telethon import TelegramClient, events, functions, types
-from telethon.errors import FloodWaitError, RPCError
+from telethon import TelegramClient, events, functions
+from telethon.errors import FloodWaitError
+from telethon.sessions import StringSession
 
 # --- НАСТРОЙКА ЛОГОВ ---
 logging.basicConfig(
@@ -19,11 +21,41 @@ logger = logging.getLogger(__name__)
 # --- КОНФИГУРАЦИЯ ---
 API_ID = int(os.getenv("API_ID", 0))
 API_HASH = os.getenv("API_HASH", "")
-SESSION_NAME = "userbot_session"
+SESSION_STRING = os.getenv("SESSION_STRING", "")
 PORT = int(os.getenv("PORT", 8080))
 
 if not API_ID or not API_HASH:
     logger.error("❌ API_ID и API_HASH не установлены!")
+    sys.exit(1)
+
+# --- ПОДГОТОВКА СЕССИИ ---
+
+# 1. Проверяем StringSession (переменная окружения)
+if SESSION_STRING:
+    logger.info("🔑 Использую StringSession")
+    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+
+# 2. Проверяем Base64 файл
+elif os.path.exists("session.b64"):
+    logger.info("📁 Декодирую session.b64...")
+    try:
+        with open("session.b64", "r") as f:
+            b64_data = f.read().strip()
+        with open("userbot_session.session", "wb") as f:
+            f.write(base64.b64decode(b64_data))
+        logger.info("✅ Сессия декодирована")
+        client = TelegramClient("userbot_session", API_ID, API_HASH)
+    except Exception as e:
+        logger.error(f"❌ Ошибка декодирования Base64: {e}")
+        sys.exit(1)
+
+# 3. Используем обычный файл сессии
+elif os.path.exists("userbot_session.session"):
+    logger.info("📁 Использую файл сессии")
+    client = TelegramClient("userbot_session", API_ID, API_HASH)
+
+else:
+    logger.error("❌ Не найдена сессия! Создай session.b64 или SESSION_STRING")
     sys.exit(1)
 
 # --- FLASK ---
@@ -32,7 +64,6 @@ app = Flask(__name__)
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 user_data = {}
 request_timestamps = []
-client = None
 client_ready = False
 
 # --- ЭНДПОИНТЫ ---
@@ -41,7 +72,7 @@ client_ready = False
 def index():
     return jsonify({
         "status": "running",
-        "service": "Gift Checker (Telethon)",
+        "service": "Gift Checker",
         "client_ready": client_ready,
         "active_checks": len([u for u in user_data.values() if u.get("status") == "active"])
     })
@@ -64,13 +95,12 @@ def stats():
             })
     return jsonify({
         "active_checks": active,
-        "finished": len([u for u in user_data.values() if u.get("status") == "finished"])
+        "finished": len([u for u in user_data.items() if u[1].get("status") == "finished"])
     })
 
 # --- ЛОГИКА TELEGRAM ---
 
 def can_make_request():
-    """Проверяет лимит запросов"""
     global request_timestamps
     now = time.time()
     request_timestamps = [t for t in request_timestamps if now - t < 60]
@@ -80,44 +110,34 @@ def can_make_request():
     return True, 0
 
 async def check_user_gifts(username):
-    """Проверяет подарки пользователя через Telethon"""
     global client, request_timestamps
     
     try:
-        # Проверяем лимит
         can_request, wait_time = can_make_request()
         if not can_request:
             await asyncio.sleep(wait_time)
             return await check_user_gifts(username)
         
-        # Получаем пользователя
         try:
             entity = await client.get_entity(username)
         except ValueError:
             return None, f"Пользователь {username} не найден"
         
-        # Запрашиваем подарки
-        try:
-            result = await client(functions.payments.GetSavedStarGiftsRequest(
-                peer=entity,
-                exclude_unsaved=True,
-                exclude_saved=False,
-                exclude_upgradable=False,
-                exclude_unupgradable=True
-            ))
-        except Exception as e:
-            return None, f"Ошибка получения подарков: {str(e)}"
+        result = await client(functions.payments.GetSavedStarGiftsRequest(
+            peer=entity,
+            exclude_unsaved=True,
+            exclude_saved=False,
+            exclude_upgradable=False,
+            exclude_unupgradable=True
+        ))
         
-        # Считаем неулучшенные подарки
         upgradable_count = 0
         if result and result.gifts:
             for gift in result.gifts:
                 if gift.can_upgrade:
                     upgradable_count += 1
         
-        # Запоминаем запрос
         request_timestamps.append(time.time())
-        
         return upgradable_count, None
         
     except FloodWaitError as e:
@@ -133,7 +153,6 @@ async def check_user_gifts(username):
         return None, str(e)
 
 async def process_batch_async(chat_id, user_id):
-    """Асинхронная обработка списка"""
     global client, user_data
     
     data = user_data.get(user_id)
@@ -150,49 +169,33 @@ async def process_batch_async(chat_id, user_id):
         
         data["index"] = index
         
-        # Пауза между батчами
         if index > 0 and index % 50 == 0:
-            await client.send_message(
-                chat_id,
-                f"⏸️ Пауза 30 сек (обработано {index}/{total})"
-            )
+            await client.send_message(chat_id, f"⏸️ Пауза 30 сек (обработано {index}/{total})")
             await asyncio.sleep(30)
         
-        # Отправляем статус
         progress_msg = await client.send_message(
             chat_id,
             f"⏳ {index + 1}/{total}\n🔄 Проверяю {username}..."
         )
         
-        # Проверяем подарки
         result, error = await check_user_gifts(username)
         
-        # Отправляем результат
         if error:
             await client.send_message(chat_id, f"❌ **{username}**\n{error}")
         else:
             if result > 0:
                 data['total_gifts'] = data.get('total_gifts', 0) + result
-                await client.send_message(
-                    chat_id, 
-                    f"✅ **{username}**\n📦 Неулучшенных: **{result}**"
-                )
+                await client.send_message(chat_id, f"✅ **{username}**\n📦 Неулучшенных: **{result}**")
             else:
-                await client.send_message(
-                    chat_id, 
-                    f"ℹ️ **{username}**\n📦 Неулучшенных: **0**"
-                )
+                await client.send_message(chat_id, f"ℹ️ **{username}**\n📦 Неулучшенных: **0**")
         
-        # Удаляем статусное сообщение
         try:
             await progress_msg.delete()
         except:
             pass
         
-        # Задержка между запросами
         await asyncio.sleep(random.uniform(2, 5))
     
-    # Финальное сообщение
     if data.get("status") != "stopped":
         total_time = int(time.time() - data["start_time"])
         await client.send_message(
@@ -207,16 +210,13 @@ async def process_batch_async(chat_id, user_id):
     data["status"] = "finished"
 
 def run_batch_sync(chat_id, user_id):
-    """Запускает асинхронную обработку в синхронной обертке"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(process_batch_async(chat_id, user_id))
 
 async def handle_new_message(event):
-    """Обработчик новых сообщений"""
     global client, user_data
     
-    # Только личные сообщения
     if not event.is_private:
         return
     
@@ -227,7 +227,6 @@ async def handle_new_message(event):
     if not text:
         return
     
-    # --- КОМАНДЫ ---
     if text.startswith('/'):
         if text.lower() in ["/stop", "стоп"]:
             if user_id in user_data:
@@ -309,69 +308,43 @@ async def handle_new_message(event):
         f"Команда: /stop"
     )
     
-    # Запускаем в отдельном потоке (для синхронного выполнения)
-    thread = threading.Thread(
-        target=run_batch_sync, 
-        args=(chat_id, user_id)
-    )
+    thread = threading.Thread(target=run_batch_sync, args=(chat_id, user_id))
     thread.daemon = True
     thread.start()
 
-# --- ЗАПУСК CLIENT ---
+# --- ЗАПУСК ---
 
 def start_telethon():
-    """Запускает Telethon клиент в отдельном потоке"""
-    global client, client_ready
+    global client_ready
     
-    # Создаем event loop для этого потока
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     try:
-        # Создаем клиент
-        client = TelegramClient(
-            SESSION_NAME,
-            API_ID,
-            API_HASH,
-            loop=loop,
-            sequential_updates=True
-        )
-        
         logger.info("🚀 Запуск Telethon...")
-        
-        # Запускаем
         client.start()
         logger.info("✅ Telethon запущен")
         
-        # Получаем информацию
         me = client.get_me()
         logger.info(f"👤 Аккаунт: @{me.username}")
         client_ready = True
         
-        # Регистрируем обработчик сообщений
         @client.on(events.NewMessage)
         async def message_handler(event):
             await handle_new_message(event)
         
-        # Блокируем поток
         client.run_until_disconnected()
         
     except Exception as e:
         logger.error(f"❌ Ошибка Telethon: {e}")
         client_ready = False
 
-# --- ЗАПУСК ---
-
 if __name__ == "__main__":
     logger.info("🚀 Запуск сервиса...")
     
-    # Запускаем Telethon в фоне
     telethon_thread = threading.Thread(target=start_telethon, daemon=True)
     telethon_thread.start()
     
-    # Даем время на инициализацию
     time.sleep(3)
     logger.info(f"🌐 Запуск Flask на порту {PORT}")
-    
-    # Запускаем Flask
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
