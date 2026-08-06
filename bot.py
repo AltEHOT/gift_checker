@@ -112,20 +112,27 @@ async def check_user_gifts(username):
             await asyncio.sleep(wait_time)
             return await check_user_gifts(username)
         
-        # 1. ПОЛУЧАЕМ ПОЛЬЗОВАТЕЛЯ ПО ЮЗЕРНЕЙМУ
-        try:
-            entity = await client.get_entity(username)
-        except ValueError:
-            return None, f"Пользователь {username} не найден"
-        except Exception as e:
-            return None, f"Ошибка получения {username}: {e}"
+        # 1. УБИРАЕМ @ ИЗ ЮЗЕРНЕЙМА (если есть)
+        clean_username = username
+        if clean_username.startswith('@'):
+            clean_username = clean_username[1:]
         
-        # 2. ЗАПРАШИВАЕМ ЕГО ПОДАРКИ (ИСПРАВЛЕННЫЙ ВЫЗОВ)
+        logger.info(f"🔍 Ищу пользователя: {clean_username}")
+        
+        # 2. ПОЛУЧАЕМ ПОЛЬЗОВАТЕЛЯ ПО ЮЗЕРНЕЙМУ (БЕЗ @)
+        try:
+            entity = await client.get_entity(clean_username)
+        except ValueError as e:
+            return None, f"Пользователь @{clean_username} не найден: {e}"
+        except Exception as e:
+            return None, f"Ошибка получения @{clean_username}: {e}"
+        
+        # 3. ЗАПРАШИВАЕМ ЕГО ПОДАРКИ
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
                 peer=entity,
-                offset=0,              # ← Добавили offset
-                limit=100,             # ← Добавили limit (максимум подарков)
+                offset=0,
+                limit=100,
                 exclude_unsaved=True,
                 exclude_saved=False,
                 exclude_upgradable=False,
@@ -134,7 +141,7 @@ async def check_user_gifts(username):
         except RPCError as e:
             return None, f"Ошибка API: {e}"
         
-        # 3. СЧИТАЕМ НЕУЛУЧШЕННЫЕ
+        # 4. СЧИТАЕМ НЕУЛУЧШЕННЫЕ
         upgradable_count = 0
         if result and result.gifts:
             for gift in result.gifts:
@@ -157,7 +164,7 @@ async def check_user_gifts(username):
         return None, str(e)
 
 async def process_batch_async(event, user_id):
-    """Обрабатывает список аккаунтов (АСИНХРОННО, в том же потоке)"""
+    """Обрабатывает список аккаунтов"""
     global client, user_data
     
     data = user_data.get(user_id)
