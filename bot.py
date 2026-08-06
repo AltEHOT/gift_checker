@@ -80,7 +80,6 @@ def is_valid_username(text):
     if not text or not isinstance(text, str):
         return False
     text = text.strip()
-    # Должен начинаться с @ и содержать только буквы, цифры, подчеркивание
     return re.match(r'^@[A-Za-z0-9_]{3,}$', text) is not None
 
 # --- ПРОВЕРКА ПОДАРКОВ ---
@@ -89,27 +88,20 @@ async def check_gifts(username):
     global client, request_timestamps
     
     try:
-        # ПРИВОДИМ К СТРОКЕ И УБИРАЕМ @
         username = str(username).strip()
         if username.startswith('@'):
             username = username[1:]
         
-        if not username:
-            return None, "Пустой username"
-        
-        # Проверяем, что это не число
-        if username.isdigit():
-            return None, "Это число, а не юзернейм"
+        if not username or username.isdigit():
+            return None, "Невалидный username"
         
         logger.info(f"🔍 Проверяю: {username}")
         
-        # Получаем пользователя
         try:
             entity = await client.get_entity(username)
         except Exception as e:
-            return None, f"Не найден: {str(e)[:30]}"
+            return None, f"Не найден"
         
-        # Запрашиваем подарки
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
                 peer=entity,
@@ -124,9 +116,8 @@ async def check_gifts(username):
             await asyncio.sleep(e.seconds + 1)
             return await check_gifts(username)
         except Exception as e:
-            return None, f"Ошибка API: {str(e)[:30]}"
+            return None, f"Ошибка API"
         
-        # Считаем неулучшенные
         count = 0
         if result and result.gifts:
             for gift in result.gifts:
@@ -138,7 +129,34 @@ async def check_gifts(username):
         
     except Exception as e:
         logger.error(f"❌ Ошибка {username}: {e}")
-        return None, str(e)[:50]
+        return None, str(e)[:30]
+
+# --- ФУНКЦИЯ ДЛЯ ФОРМИРОВАНИЯ ОТЧЕТА ---
+def format_report(results, total_time, total_gifts):
+    """Формирует красивый отчет из результатов"""
+    lines = []
+    lines.append("✅ **ПРОВЕРКА ЗАВЕРШЕНА!**")
+    lines.append("━━━━━━━━━━━━━━━━━")
+    
+    # Сортируем: сначала те, у кого есть подарки
+    sorted_results = sorted(results, key=lambda x: x[1] if x[1] is not None else -1, reverse=True)
+    
+    for username, count, error in sorted_results:
+        if error:
+            lines.append(f"❌ {username}: {error}")
+        elif count is None:
+            lines.append(f"❌ {username}: ошибка")
+        elif count > 0:
+            lines.append(f"✅ {username}: **{count}** 🎁")
+        else:
+            lines.append(f"ℹ️ {username}: 0")
+    
+    lines.append("━━━━━━━━━━━━━━━━━")
+    lines.append(f"📊 Всего проверено: **{len(results)}** аккаунтов")
+    lines.append(f"⏱ Время: **{total_time}** сек")
+    lines.append(f"🎁 Найдено подарков: **{total_gifts}**")
+    
+    return "\n".join(lines)
 
 # --- ОБРАБОТЧИК СООБЩЕНИЙ ---
 @client.on(events.NewMessage)
@@ -171,7 +189,8 @@ async def handler(event):
                     total = len(data["usernames"])
                     current = data.get("index", 0)
                     await event.reply(
-                        f"📊 Прогресс: {current}/{total}\n🎁 Найдено: {data.get('total_gifts', 0)}"
+                        f"📊 Прогресс: {current}/{total}\n"
+                        f"🎁 Найдено: {data.get('total_gifts', 0)}"
                     )
                 else:
                     await event.reply("ℹ️ Нет активной проверки.")
@@ -199,12 +218,10 @@ async def handler(event):
             )
             return
         
-        # Извлекаем все @username
         lines = text.strip().split('\n')
         usernames = []
         for line in lines:
             if '@' in line:
-                # Берем часть до разделителя
                 for sep in [' - ', '—', ' -', '- ', '\t', ' ']:
                     if sep in line:
                         username = line.split(sep)[0].strip()
@@ -212,11 +229,8 @@ async def handler(event):
                 else:
                     username = line.strip()
                 
-                # ПРОВЕРЯЕМ, ЧТО ЭТО ВАЛИДНЫЙ ЮЗЕРНЕЙМ
                 if is_valid_username(username):
                     usernames.append(username)
-                else:
-                    logger.warning(f"⚠️ Пропускаю невалидный username: {username}")
         
         if not usernames:
             await event.reply(
@@ -233,13 +247,14 @@ async def handler(event):
             )
             return
         
-        # Сохраняем
+        # Сохраняем данные
         user_data[user_id] = {
             "usernames": usernames,
             "index": 0,
             "status": "active",
             "start_time": time.time(),
-            "total_gifts": 0
+            "total_gifts": 0,
+            "results": []  # ← БУДЕМ СОБИРАТЬ РЕЗУЛЬТАТЫ
         }
         
         await event.reply(
@@ -251,6 +266,7 @@ async def handler(event):
         # --- ЗАПУСК ПРОВЕРКИ ---
         data = user_data[user_id]
         total = len(usernames)
+        results = []
         
         for index, username in enumerate(usernames):
             if data.get("status") == "stopped":
@@ -263,31 +279,36 @@ async def handler(event):
                 await event.reply(f"⏸️ Пауза 30 сек ({index}/{total})")
                 await asyncio.sleep(30)
             
-            await event.reply(f"⏳ {index + 1}/{total} - {username}")
+            # Показываем прогресс (одно сообщение, обновляем прогресс)
+            if index % 10 == 0 or index == total - 1:
+                await event.reply(f"⏳ {index + 1}/{total} - проверяю...")
             
             count, error = await check_gifts(username)
             
+            # СОХРАНЯЕМ РЕЗУЛЬТАТ
             if error:
-                await event.reply(f"❌ {username}\n{error}")
+                results.append((username, None, error))
             else:
-                if count > 0:
+                if count and count > 0:
                     data['total_gifts'] = data.get('total_gifts', 0) + count
-                    await event.reply(f"✅ {username}\n📦 Неулучшенных: **{count}**")
-                else:
-                    await event.reply(f"ℹ️ {username}\n📦 Неулучшенных: **0**")
+                results.append((username, count, None))
             
             await asyncio.sleep(random.uniform(2, 4))
         
-        # Финал
+        # --- ОТПРАВЛЯЕМ ФИНАЛЬНЫЙ ОТЧЕТ ---
         if data.get("status") != "stopped":
             total_time = int(time.time() - data["start_time"])
-            await event.reply(
-                f"✅ **Проверка завершена!**\n"
-                f"━━━━━━━━━━━━━━━━━\n"
-                f"📊 Всего: **{total}** аккаунтов\n"
-                f"⏱ Время: **{total_time}** сек\n"
-                f"🎁 Найдено: **{data.get('total_gifts', 0)}**"
-            )
+            report = format_report(results, total_time, data.get('total_gifts', 0))
+            
+            # Разбиваем отчет на части, если он слишком длинный (Telegram лимит 4096)
+            if len(report) > 4000:
+                parts = [report[i:i+4000] for i in range(0, len(report), 4000)]
+                for part in parts:
+                    await event.reply(part)
+            else:
+                await event.reply(report)
+        else:
+            await event.reply("⏹️ Проверка остановлена.")
         
         data["status"] = "finished"
         
@@ -295,7 +316,6 @@ async def handler(event):
         wait = e.seconds
         logger.warning(f"⏳ FloodWait: {wait} сек")
         await asyncio.sleep(wait + 1)
-        # Пробуем перезапустить обработку
         await handler(event)
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
