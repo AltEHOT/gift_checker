@@ -6,6 +6,8 @@ import logging
 import threading
 import asyncio
 from flask import Flask, jsonify
+from telethon import TelegramClient, events, functions, types
+from telethon.errors import FloodWaitError, RPCError
 
 # --- НАСТРОЙКА ЛОГОВ ---
 logging.basicConfig(
@@ -30,8 +32,8 @@ app = Flask(__name__)
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 user_data = {}
 request_timestamps = []
-pyro_client = None
-pyro_ready = False
+client = None
+client_ready = False
 
 # --- ЭНДПОИНТЫ ---
 
@@ -39,14 +41,14 @@ pyro_ready = False
 def index():
     return jsonify({
         "status": "running",
-        "service": "Gift Checker",
-        "pyrogram_ready": pyro_ready,
+        "service": "Gift Checker (Telethon)",
+        "client_ready": client_ready,
         "active_checks": len([u for u in user_data.values() if u.get("status") == "active"])
     })
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "alive", "pyrogram": pyro_ready}), 200
+    return jsonify({"status": "alive", "client_ready": client_ready}), 200
 
 @app.route('/stats', methods=['GET'])
 def stats():
@@ -65,27 +67,10 @@ def stats():
         "finished": len([u for u in user_data.values() if u.get("status") == "finished"])
     })
 
-# --- ЛОГИКА PYROGRAM ---
-
-def init_pyrogram():
-    """Инициализация клиента Pyrogram"""
-    from pyrogram import Client
-    try:
-        client = Client(
-            SESSION_NAME,
-            api_id=API_ID,
-            api_hash=API_HASH,
-            workdir=".",
-            sleep_threshold=30,
-            no_updates=True
-        )
-        logger.info("✅ Клиент Pyrogram создан")
-        return client
-    except Exception as e:
-        logger.error(f"❌ Ошибка создания клиента: {e}")
-        return None
+# --- ЛОГИКА TELEGRAM ---
 
 def can_make_request():
+    """Проверяет лимит запросов"""
     global request_timestamps
     now = time.time()
     request_timestamps = [t for t in request_timestamps if now - t < 60]
@@ -94,51 +79,62 @@ def can_make_request():
         return False, wait_time
     return True, 0
 
-def process_account_sync(username, chat_id, user_id):
-    global pyro_client, request_timestamps
-    
-    if not pyro_client:
-        return None, "Клиент не готов"
+async def check_user_gifts(username):
+    """Проверяет подарки пользователя через Telethon"""
+    global client, request_timestamps
     
     try:
+        # Проверяем лимит
         can_request, wait_time = can_make_request()
         if not can_request:
-            time.sleep(wait_time)
-            return process_account_sync(username, chat_id, user_id)
+            await asyncio.sleep(wait_time)
+            return await check_user_gifts(username)
         
-        from pyrogram.raw.functions.payments import GetSavedStarGifts
+        # Получаем пользователя
+        try:
+            entity = await client.get_entity(username)
+        except ValueError:
+            return None, f"Пользователь {username} не найден"
         
-        entity = pyro_client.get_users(username)
-        peer = pyro_client.resolve_peer(entity.id)
-        
-        gifts_result = pyro_client.invoke(
-            GetSavedStarGifts(
-                peer=peer,
+        # Запрашиваем подарки
+        try:
+            result = await client(functions.payments.GetSavedStarGiftsRequest(
+                peer=entity,
                 exclude_unsaved=True,
                 exclude_saved=False,
                 exclude_upgradable=False,
                 exclude_unupgradable=True
-            )
-        )
+            ))
+        except Exception as e:
+            return None, f"Ошибка получения подарков: {str(e)}"
         
+        # Считаем неулучшенные подарки
         upgradable_count = 0
-        if gifts_result and hasattr(gifts_result, 'gifts'):
-            for gift in gifts_result.gifts:
-                if hasattr(gift, 'can_upgrade') and gift.can_upgrade:
+        if result and result.gifts:
+            for gift in result.gifts:
+                if gift.can_upgrade:
                     upgradable_count += 1
         
+        # Запоминаем запрос
         request_timestamps.append(time.time())
+        
         return upgradable_count, None
+        
+    except FloodWaitError as e:
+        wait_time = e.seconds
+        logger.warning(f"⏳ FloodWait: {wait_time} сек для {username}")
+        await asyncio.sleep(min(wait_time, 60))
+        if wait_time < 60:
+            return await check_user_gifts(username)
+        return None, f"FloodWait: {wait_time} сек"
         
     except Exception as e:
         logger.error(f"❌ Ошибка {username}: {e}")
         return None, str(e)
 
-def process_batch_sync(chat_id, user_id):
-    global pyro_client, user_data
-    
-    if not pyro_client:
-        return
+async def process_batch_async(chat_id, user_id):
+    """Асинхронная обработка списка"""
+    global client, user_data
     
     data = user_data.get(user_id)
     if not data:
@@ -149,41 +145,57 @@ def process_batch_sync(chat_id, user_id):
     
     for index, username in enumerate(usernames):
         if data.get("status") == "stopped":
-            pyro_client.send_message(chat_id, "⏹️ Проверка остановлена.")
+            await client.send_message(chat_id, "⏹️ Проверка остановлена.")
             break
         
         data["index"] = index
         
+        # Пауза между батчами
         if index > 0 and index % 50 == 0:
-            pyro_client.send_message(chat_id, f"⏸️ Пауза 30 сек (обработано {index}/{total})")
-            time.sleep(30)
+            await client.send_message(
+                chat_id,
+                f"⏸️ Пауза 30 сек (обработано {index}/{total})"
+            )
+            await asyncio.sleep(30)
         
-        progress_msg = pyro_client.send_message(
+        # Отправляем статус
+        progress_msg = await client.send_message(
             chat_id,
             f"⏳ {index + 1}/{total}\n🔄 Проверяю {username}..."
         )
         
-        result, error = process_account_sync(username, chat_id, user_id)
+        # Проверяем подарки
+        result, error = await check_user_gifts(username)
         
+        # Отправляем результат
         if error:
-            pyro_client.send_message(chat_id, f"❌ **{username}**\n{error}")
+            await client.send_message(chat_id, f"❌ **{username}**\n{error}")
         else:
             if result > 0:
                 data['total_gifts'] = data.get('total_gifts', 0) + result
-                pyro_client.send_message(chat_id, f"✅ **{username}**\n📦 Неулучшенных: **{result}**")
+                await client.send_message(
+                    chat_id, 
+                    f"✅ **{username}**\n📦 Неулучшенных: **{result}**"
+                )
             else:
-                pyro_client.send_message(chat_id, f"ℹ️ **{username}**\n📦 Неулучшенных: **0**")
+                await client.send_message(
+                    chat_id, 
+                    f"ℹ️ **{username}**\n📦 Неулучшенных: **0**"
+                )
         
+        # Удаляем статусное сообщение
         try:
-            progress_msg.delete()
+            await progress_msg.delete()
         except:
             pass
         
-        time.sleep(random.uniform(2, 5))
+        # Задержка между запросами
+        await asyncio.sleep(random.uniform(2, 5))
     
+    # Финальное сообщение
     if data.get("status") != "stopped":
         total_time = int(time.time() - data["start_time"])
-        pyro_client.send_message(
+        await client.send_message(
             chat_id,
             f"✅ **Проверка завершена!**\n"
             f"━━━━━━━━━━━━━━━━━\n"
@@ -194,19 +206,33 @@ def process_batch_sync(chat_id, user_id):
     
     data["status"] = "finished"
 
-def handle_new_message(message_text, chat_id, user_id):
-    global pyro_client, user_data
+def run_batch_sync(chat_id, user_id):
+    """Запускает асинхронную обработку в синхронной обертке"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(process_batch_async(chat_id, user_id))
+
+async def handle_new_message(event):
+    """Обработчик новых сообщений"""
+    global client, user_data
     
-    if not pyro_client:
+    # Только личные сообщения
+    if not event.is_private:
         return
     
-    text = message_text.strip()
+    user_id = event.sender_id
+    chat_id = event.chat_id
+    text = event.message.text
     
+    if not text:
+        return
+    
+    # --- КОМАНДЫ ---
     if text.startswith('/'):
         if text.lower() in ["/stop", "стоп"]:
             if user_id in user_data:
                 user_data[user_id]["status"] = "stopped"
-                pyro_client.send_message(chat_id, "⏹️ Остановлено.")
+                await client.send_message(chat_id, "⏹️ Проверка остановлена.")
             return
         
         if text.lower() in ["/stats", "статистика"]:
@@ -214,17 +240,17 @@ def handle_new_message(message_text, chat_id, user_id):
                 data = user_data[user_id]
                 total = len(data["usernames"])
                 current = data.get("index", 0)
-                pyro_client.send_message(
+                await client.send_message(
                     chat_id,
                     f"📊 **Прогресс:** {current}/{total}\n"
                     f"🎁 Найдено: {data.get('total_gifts', 0)}"
                 )
             else:
-                pyro_client.send_message(chat_id, "ℹ️ Нет активной проверки.")
+                await client.send_message(chat_id, "ℹ️ Нет активной проверки.")
             return
         
         if text.lower() in ["/help", "помощь"]:
-            pyro_client.send_message(
+            await client.send_message(
                 chat_id,
                 "🤖 **Помощь**\n\n"
                 "Отправь список @username\n"
@@ -240,7 +266,7 @@ def handle_new_message(message_text, chat_id, user_id):
     # --- ПАРСИНГ СПИСКА ---
     if user_id in user_data and user_data[user_id].get("status") == "active":
         data = user_data[user_id]
-        pyro_client.send_message(
+        await client.send_message(
             chat_id,
             f"⏳ Уже идет проверка: {data['index']}/{len(data['usernames'])}"
         )
@@ -260,11 +286,11 @@ def handle_new_message(message_text, chat_id, user_id):
                 usernames.append(username)
     
     if not usernames:
-        pyro_client.send_message(chat_id, "❌ Не найдено @username")
+        await client.send_message(chat_id, "❌ Не найдено @username")
         return
     
     if len(usernames) > 200:
-        pyro_client.send_message(chat_id, f"⚠️ Максимум 200 аккаунтов")
+        await client.send_message(chat_id, f"⚠️ Максимум 200 аккаунтов")
         return
     
     user_data[user_id] = {
@@ -276,65 +302,72 @@ def handle_new_message(message_text, chat_id, user_id):
         "chat_id": chat_id
     }
     
-    pyro_client.send_message(
+    await client.send_message(
         chat_id,
         f"✅ Получено {len(usernames)} аккаунтов.\n"
         f"⏱ ~{len(usernames) * 3} сек\n"
         f"Команда: /stop"
     )
     
-    thread = threading.Thread(target=process_batch_sync, args=(chat_id, user_id))
+    # Запускаем в отдельном потоке (для синхронного выполнения)
+    thread = threading.Thread(
+        target=run_batch_sync, 
+        args=(chat_id, user_id)
+    )
     thread.daemon = True
     thread.start()
 
-# --- ЗАПУСК PYROGRAM С EVENT LOOP ---
+# --- ЗАПУСК CLIENT ---
 
-def start_pyrogram():
-    """Запуск Pyrogram с правильным event loop"""
-    global pyro_client, pyro_ready
+def start_telethon():
+    """Запускает Telethon клиент в отдельном потоке"""
+    global client, client_ready
     
-    # СОЗДАЕМ EVENT LOOP ВРУЧНУЮ
+    # Создаем event loop для этого потока
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     try:
-        pyro_client = init_pyrogram()
-        if not pyro_client:
-            logger.error("❌ Не удалось создать клиент")
-            return
+        # Создаем клиент
+        client = TelegramClient(
+            SESSION_NAME,
+            API_ID,
+            API_HASH,
+            loop=loop,
+            sequential_updates=True
+        )
         
-        logger.info("🚀 Запуск Pyrogram...")
-        pyro_client.start()
-        logger.info("✅ Pyrogram запущен")
+        logger.info("🚀 Запуск Telethon...")
         
-        me = pyro_client.get_me()
+        # Запускаем
+        client.start()
+        logger.info("✅ Telethon запущен")
+        
+        # Получаем информацию
+        me = client.get_me()
         logger.info(f"👤 Аккаунт: @{me.username}")
-        pyro_ready = True
+        client_ready = True
         
-        @pyro_client.on_message()
-        def message_handler(client, message):
-            if message.chat.type.name == "PRIVATE":
-                handle_new_message(
-                    message.text,
-                    message.chat.id,
-                    message.from_user.id
-                )
+        # Регистрируем обработчик сообщений
+        @client.on(events.NewMessage)
+        async def message_handler(event):
+            await handle_new_message(event)
         
-        # БЛОКИРУЕМ ПОТОК
-        pyro_client.idle()
+        # Блокируем поток
+        client.run_until_disconnected()
         
     except Exception as e:
-        logger.error(f"❌ Ошибка Pyrogram: {e}")
-        pyro_ready = False
+        logger.error(f"❌ Ошибка Telethon: {e}")
+        client_ready = False
 
 # --- ЗАПУСК ---
 
 if __name__ == "__main__":
     logger.info("🚀 Запуск сервиса...")
     
-    # Запускаем Pyrogram в фоне
-    pyro_thread = threading.Thread(target=start_pyrogram, daemon=True)
-    pyro_thread.start()
+    # Запускаем Telethon в фоне
+    telethon_thread = threading.Thread(target=start_telethon, daemon=True)
+    telethon_thread.start()
     
     # Даем время на инициализацию
     time.sleep(3)
