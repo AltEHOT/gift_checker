@@ -11,7 +11,6 @@ from flask import Flask, jsonify
 from telethon import TelegramClient, events, functions
 from telethon.errors import FloodWaitError, RPCError
 from telethon.sessions import StringSession
-from telethon.tl.types import InputPeerUser
 
 # --- НАСТРОЙКА ЛОГОВ ---
 logging.basicConfig(
@@ -87,7 +86,7 @@ async def check_gifts(username):
     global client, request_timestamps
     
     try:
-        # --- ПРИНУДИТЕЛЬНО ПРЕОБРАЗУЕМ В СТРОКУ ---
+        # --- ПРИНУДИТЕЛЬНО СТРОКА ---
         username = str(username).strip()
         
         if username.startswith('@'):
@@ -98,21 +97,17 @@ async def check_gifts(username):
         
         logger.info(f"🔍 Проверяю: {username}")
         
+        # --- ПРОВЕРЯЕМ, ЧТО ПОЛЬЗОВАТЕЛЬ СУЩЕСТВУЕТ ---
         try:
             entity = await client.get_entity(username)
         except Exception as e:
             logger.error(f"❌ Ошибка получения {username}: {e}")
             return None, f"Не найден"
         
-        # --- ПРАВИЛЬНЫЙ СПОСОБ: InputPeerUser ---
+        # --- ПЕРЕДАЕМ СТРОКУ (ЮЗЕРНЕЙМ) КАК PEER ---
         try:
-            input_peer = InputPeerUser(
-                user_id=entity.id,
-                access_hash=entity.access_hash
-            )
-            
             result = await client(functions.payments.GetSavedStarGiftsRequest(
-                peer=input_peer,
+                peer=username,  # ← ПРОСТО СТРОКА!
                 offset=0,
                 limit=100,
                 exclude_unsaved=True,
@@ -129,7 +124,7 @@ async def check_gifts(username):
             logger.error(f"❌ Ошибка GetSavedStarGifts для {username}: {e}")
             return None, f"Ошибка API: {str(e)[:50]}"
         
-        # Считаем неулучшенные (can_upgrade == True)
+        # Считаем неулучшенные
         count = 0
         if result and result.gifts:
             for gift in result.gifts:
