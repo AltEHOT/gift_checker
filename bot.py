@@ -81,7 +81,7 @@ def is_valid_username(text):
     text = text.strip()
     return re.match(r'^@[A-Za-z0-9_]{3,}$', text) is not None
 
-# --- ПРОВЕРКА ПОДАРКОВ (ФИНАЛЬНАЯ ВЕРСИЯ) ---
+# --- ПРОВЕРКА ПОДАРКОВ (ИСПРАВЛЕННАЯ) ---
 async def check_gifts(username):
     global client, request_timestamps
     
@@ -120,26 +120,25 @@ async def check_gifts(username):
             logger.error(f"❌ Ошибка GetSavedStarGifts для {username}: {e}")
             return None, f"Ошибка API: {str(e)[:50]}"
         
-        # --- ПРАВИЛЬНЫЙ ПОДСЧЕТ: используем upgrade_variants ---
+        # --- ПОДСЧЕТ: upgrade_variants ИЛИ prepaid_upgrade_hash ---
         count = 0
         total = 0
         if result and result.gifts:
             for gift_obj in result.gifts:
                 total += 1
                 
-                # Проверяем, можно ли улучшить подарок
                 can_upgrade = False
                 
-                # Способ 1: Проверяем upgrade_variants (если есть число > 0)
+                # Если есть upgrade_variants (число > 0)
                 if hasattr(gift_obj, 'upgrade_variants') and gift_obj.upgrade_variants:
                     can_upgrade = True
-                    logger.info(f"   ✅ Неулучшенный подарок #{total} (upgrade_variants={gift_obj.upgrade_variants})")
-                # Способ 2: Проверяем prepaid_upgrade_hash (если есть строка)
+                    logger.info(f"   ✅ Неулучшенный #{total} (upgrade_variants={gift_obj.upgrade_variants})")
+                # Если есть prepaid_upgrade_hash (строка)
                 elif hasattr(gift_obj, 'prepaid_upgrade_hash') and gift_obj.prepaid_upgrade_hash:
                     can_upgrade = True
-                    logger.info(f"   ✅ Неулучшенный подарок #{total} (есть prepaid_upgrade_hash)")
+                    logger.info(f"   ✅ Неулучшенный #{total} (есть prepaid_upgrade_hash)")
                 else:
-                    logger.info(f"   ❌ Уже улучшенный подарок #{total}")
+                    logger.info(f"   ❌ Уже улучшенный #{total}")
                 
                 if can_upgrade:
                     count += 1
