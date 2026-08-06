@@ -95,14 +95,14 @@ async def check_gifts(username):
         
         logger.info(f"🔍 Проверяю: {username}")
         
-        # --- ПОЛУЧАЕМ InputPeer (ГАРАНТИРОВАННО РАБОТАЕТ) ---
+        # --- ПОЛУЧАЕМ InputPeer ---
         try:
             input_peer = await client.get_input_entity(username)
         except Exception as e:
             logger.error(f"❌ Ошибка получения {username}: {e}")
             return None, f"Не найден"
         
-        # --- ПРАВИЛЬНЫЙ ВЫЗОВ ---
+        # --- ЗАПРАШИВАЕМ ВСЕ ПОДАРКИ (БЕЗ ФИЛЬТРОВ) ---
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
                 peer=input_peer,
@@ -111,7 +111,7 @@ async def check_gifts(username):
                 exclude_unsaved=False,
                 exclude_saved=False,
                 exclude_upgradable=False,
-                exclude_unupgradable=True
+                exclude_unupgradable=False  # ← УБРАЛИ ВСЕ ФИЛЬТРЫ
             ))
         except FloodWaitError as e:
             wait = e.seconds
@@ -122,15 +122,20 @@ async def check_gifts(username):
             logger.error(f"❌ Ошибка GetSavedStarGifts для {username}: {e}")
             return None, f"Ошибка API: {str(e)[:50]}"
         
-        # Считаем неулучшенные
+        # --- СЧИТАЕМ НЕУЛУЧШЕННЫЕ ВРУЧНУЮ ---
         count = 0
+        total = 0
         if result and result.gifts:
             for gift in result.gifts:
+                total += 1
+                # can_upgrade = True значит подарок НЕ УЛУЧШЕН
                 if gift.can_upgrade:
                     count += 1
+                    logger.info(f"   🎁 Найден неулучшенный подарок для {username}")
+        
+        logger.info(f"📊 {username}: всего {total} подарков, из них неулучшенных: {count}")
         
         request_timestamps.append(time.time())
-        logger.info(f"✅ {username}: {count} подарков")
         return count, None
         
     except Exception as e:
