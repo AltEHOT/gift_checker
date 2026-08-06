@@ -42,46 +42,49 @@ is_ready = False
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def can_make_request():
-    """Проверяет лимит запросов"""
     global request_timestamps
     now = time.time()
     request_timestamps = [t for t in request_timestamps if now - t < 60]
-    
     if len(request_timestamps) >= MAX_REQUESTS_PER_MINUTE:
         wait_time = 60 - (now - request_timestamps[0])
         return False, wait_time
     return True, 0
 
 def get_delay():
-    """Случайная задержка"""
     return random.uniform(MIN_DELAY, MAX_DELAY)
 
 # --- ИНИЦИАЛИЗАЦИЯ PYROGRAM ---
 
 def init_pyrogram():
-    """Инициализирует клиент Pyrogram"""
     global pyro_client
     from pyrogram import Client
     from pyrogram.enums import ChatType
     from pyrogram.errors import FloodWait, RPCError
     from pyrogram.raw.functions.payments import GetSavedStarGifts
     
-    pyro_client = Client(
-        SESSION_NAME,
-        api_id=API_ID,
-        api_hash=API_HASH,
-        workdir=".",
-        sleep_threshold=30,
-        no_updates=True,
-        in_memory=False
-    )
-    return pyro_client
+    try:
+        pyro_client = Client(
+            SESSION_NAME,
+            api_id=API_ID,
+            api_hash=API_HASH,
+            workdir=".",
+            sleep_threshold=30,
+            no_updates=True,
+            in_memory=False
+        )
+        logger.info("✅ Клиент Pyrogram создан")
+        return pyro_client
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания клиента: {e}")
+        return None
 
 # --- ОСНОВНАЯ ЛОГИКА ---
 
 def process_account_sync(username, chat_id, user_id):
-    """Синхронная проверка аккаунта"""
     global pyro_client, request_timestamps
+    
+    if not pyro_client:
+        return None, "Клиент не инициализирован"
     
     try:
         can_request, wait_time = can_make_request()
@@ -115,7 +118,7 @@ def process_account_sync(username, chat_id, user_id):
     except FloodWait as e:
         wait_time = e.value
         logger.warning(f"⏳ FloodWait: {wait_time} сек")
-        time.sleep(wait_time)
+        time.sleep(min(wait_time, 60))
         if wait_time < 60:
             return process_account_sync(username, chat_id, user_id)
         return None, f"FloodWait: {wait_time} сек"
@@ -125,7 +128,6 @@ def process_account_sync(username, chat_id, user_id):
         return None, str(e)
 
 def process_batch_sync(chat_id, user_id):
-    """Синхронная обработка всего списка"""
     global pyro_client, user_data
     
     data = user_data.get(user_id)
@@ -187,8 +189,10 @@ def process_batch_sync(chat_id, user_id):
     data["status"] = "finished"
 
 def handle_new_message(message_text, chat_id, user_id):
-    """Обрабатывает новое сообщение"""
     global pyro_client, user_data
+    
+    if not pyro_client:
+        return
     
     text = message_text.strip()
     
@@ -293,11 +297,14 @@ def handle_new_message(message_text, chat_id, user_id):
 # --- ЗАПУСК PYROGRAM ---
 
 def run_pyrogram_client():
-    """Запускает клиент Pyrogram"""
     global pyro_client, is_ready
     
     try:
         pyro_client = init_pyrogram()
+        if not pyro_client:
+            logger.error("❌ Не удалось создать клиент")
+            return
+        
         pyro_client.start()
         logger.info("✅ Pyrogram клиент запущен")
         
@@ -357,16 +364,12 @@ def stats():
 def main():
     """Главная функция"""
     logger.info("🚀 Запуск сервиса...")
-    logger.info(f"📊 API_ID: {API_ID}")
     
-    # Запускаем Pyrogram
+    # Запускаем Pyrogram в фоне
     pyro_thread = threading.Thread(target=run_pyrogram_client, daemon=True)
     pyro_thread.start()
     
-    # Ждем инициализации
-    time.sleep(3)
-    
-    # Запускаем Flask
+    # Flask запускаем СРАЗУ, не ждем Pyrogram
     logger.info(f"🌐 Запуск Flask на порту {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
 
