@@ -9,10 +9,10 @@ from pyrogram.raw.functions.payments import GetSavedStarGifts
 from pyrogram.enums import ChatType
 from pyrogram.errors import FloodWait
 
-# --- НАСТРОЙКА ЛОГОВ ---
+# --- НАСТРОЙКА ---
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
@@ -23,13 +23,13 @@ SESSION_NAME = "userbot_session"
 PORT = int(os.getenv("PORT", 5000))
 
 if not API_ID or not API_HASH:
-    logger.error("❌ API_ID и API_HASH должны быть установлены!")
+    logger.error("❌ API_ID и API_HASH не установлены!")
     exit(1)
 
 # --- FLASK ---
 app = Flask(__name__)
 
-# --- PYROGRAM КЛИЕНТ ---
+# --- PYROGRAM КЛИЕНТ (с tgcrypto) ---
 pyro_client = Client(
     SESSION_NAME,
     api_id=API_ID,
@@ -40,7 +40,7 @@ pyro_client = Client(
 # --- ХРАНИЛИЩЕ ---
 user_data = {}
 
-# --- ОБРАБОТЧИКИ ---
+# --- ОБРАБОТКА ---
 
 async def process_next_account(chat_id, user_id):
     """Обрабатывает следующий аккаунт"""
@@ -57,7 +57,6 @@ async def process_next_account(chat_id, user_id):
             f"✅ **Проверка завершена!**\nВсего проверено: {len(usernames)} аккаунтов."
         )
         data["status"] = "finished"
-        data["end_time"] = time.time()
         return
 
     username = usernames[index]
@@ -65,9 +64,11 @@ async def process_next_account(chat_id, user_id):
     await pyro_client.send_message(chat_id, f"{progress}\n🔄 Проверяю {username}...")
 
     try:
+        # Получаем пользователя
         entity = await pyro_client.get_users(username)
         peer = await pyro_client.resolve_peer(entity.id)
 
+        # Запрашиваем подарки
         gifts_result = await pyro_client.invoke(
             GetSavedStarGifts(
                 peer=peer,
@@ -78,6 +79,7 @@ async def process_next_account(chat_id, user_id):
             )
         )
 
+        # Считаем неулучшенные
         upgradable_count = 0
         if gifts_result and hasattr(gifts_result, 'gifts'):
             for gift in gifts_result.gifts:
@@ -94,7 +96,7 @@ async def process_next_account(chat_id, user_id):
 
     except FloodWait as e:
         wait_time = e.value
-        logger.warning(f"⏳ FloodWait: ждём {wait_time} секунд")
+        logger.warning(f"⏳ FloodWait: {wait_time} сек")
         await pyro_client.send_message(chat_id, f"⏳ Жду {wait_time} секунд...")
         await asyncio.sleep(wait_time)
         await process_next_account(chat_id, user_id)
@@ -117,16 +119,19 @@ async def handle_new_message(client, message):
     chat_id = message.chat.id
     text = message.text
 
+    # Команды
     if text.startswith('/'):
         if text.lower() in ["/stop", "стоп"]:
             if user_id in user_data:
                 del user_data[user_id]
                 await pyro_client.send_message(chat_id, "⏹️ Проверка остановлена.")
+                logger.info(f"🛑 Пользователь {user_id} остановил проверку")
             return
         return
 
-    logger.info(f"📩 Сообщение от {user_id}: {text[:100]}...")
+    logger.info(f"📩 Сообщение от {user_id}: {text[:50]}...")
 
+    # Проверка на активную обработку
     if user_id in user_data and user_data[user_id].get("status") != "finished":
         await pyro_client.send_message(
             chat_id,
@@ -135,6 +140,7 @@ async def handle_new_message(client, message):
         )
         return
 
+    # Парсим список
     lines = text.strip().split('\n')
     usernames = []
     for line in lines:
@@ -157,6 +163,7 @@ async def handle_new_message(client, message):
         )
         return
 
+    # Сохраняем
     user_data[user_id] = {
         "usernames": usernames,
         "index": 0,
@@ -182,7 +189,8 @@ def index():
     finished = len([u for u in user_data.values() if u.get("status") == "finished"])
     return jsonify({
         "status": "running",
-        "service": "Gift Checker (cryptg)",
+        "service": "Gift Checker",
+        "crypto": "tgcrypto",
         "active_checks": active,
         "finished_checks": finished,
         "total": len(user_data)
@@ -199,12 +207,16 @@ def stats():
         if data.get("status") != "finished":
             total = len(data["usernames"])
             current = data["index"]
+            elapsed = int(time.time() - data.get("start_time", time.time()))
             active.append({
                 "user_id": user_id,
                 "progress": f"{current}/{total}",
-                "status": data.get("status", "unknown")
+                "elapsed_seconds": elapsed
             })
-    return jsonify({"active_checks": active})
+    return jsonify({
+        "active_checks": active,
+        "finished": len([u for u in user_data.values() if u.get("status") == "finished"])
+    })
 
 # --- ЗАПУСК PYROGRAM ---
 
@@ -215,7 +227,7 @@ def run_pyrogram():
         await handle_new_message(client, message)
 
     try:
-        logger.info("🚀 Запуск Pyrogram с cryptg...")
+        logger.info("🚀 Запуск Pyrogram с tgcrypto...")
         pyro_client.run()
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
