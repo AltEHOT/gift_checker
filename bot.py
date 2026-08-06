@@ -87,7 +87,9 @@ async def check_gifts(username):
     global client, request_timestamps
     
     try:
+        # --- ПРИНУДИТЕЛЬНО ПРЕОБРАЗУЕМ В СТРОКУ ---
         username = str(username).strip()
+        
         if username.startswith('@'):
             username = username[1:]
         
@@ -109,7 +111,6 @@ async def check_gifts(username):
                 access_hash=entity.access_hash
             )
             
-            # Используем сырой invoke
             result = await client(functions.payments.GetSavedStarGiftsRequest(
                 peer=input_peer,
                 offset=0,
