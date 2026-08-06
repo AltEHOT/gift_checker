@@ -240,10 +240,8 @@ async def process_batch_async(chat_id, user_id):
     
     data["status"] = "finished"
 
-# --- ЗАПУСКАЕМ АСИНХРОННУЮ ФУНКЦИЮ В НОВОМ ПОТОКЕ ---
 def run_batch_sync(chat_id, user_id):
     """Запускает асинхронную обработку в новом event loop"""
-    # СОЗДАЕМ НОВЫЙ LOOP ДЛЯ ЭТОГО ПОТОКА
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -259,7 +257,6 @@ async def handle_new_message(event):
     global client, user_data
     
     try:
-        # Только личные сообщения
         if not event.is_private:
             return
         
@@ -347,7 +344,6 @@ async def handle_new_message(event):
             )
             return
         
-        # Сохраняем данные
         user_data[user_id] = {
             "usernames": usernames,
             "index": 0,
@@ -367,7 +363,6 @@ async def handle_new_message(event):
             f"Для статистики: /stats"
         )
         
-        # Запускаем проверку в отдельном потоке (без лишней магии)
         thread = threading.Thread(
             target=run_batch_sync, 
             args=(chat_id, user_id)
@@ -384,17 +379,22 @@ async def handle_new_message(event):
         except:
             pass
 
-# --- ЗАПУСК TELEGRAM ---
+# --- ЗАПУСК TELEGRAM (ИСПРАВЛЕННЫЙ) ---
 def start_telethon():
     global client_ready
+    
+    # СОЗДАЕМ EVENT LOOP ДЛЯ ЭТОГО ПОТОКА
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
     try:
         logger.info("🚀 Запуск Telethon...")
         client.start()
         logger.info("✅ Telethon запущен")
         
-        # Получаем информацию
-        me = client.get_me()
+        # ПРАВИЛЬНЫЙ ВЫЗОВ get_me() ЧЕРЕЗ loop
+        me = loop.run_until_complete(client.get_me())
+        
         logger.info(f"👤 Аккаунт: @{me.username}")
         logger.info(f"📱 ID: {me.id}")
         client_ready = True
