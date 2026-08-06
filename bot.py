@@ -11,6 +11,7 @@ from flask import Flask, jsonify
 from telethon import TelegramClient, events, functions
 from telethon.errors import FloodWaitError, RPCError
 from telethon.sessions import StringSession
+from telethon.tl.types import InputPeerUser
 
 # --- НАСТРОЙКА ЛОГОВ ---
 logging.basicConfig(
@@ -95,20 +96,22 @@ async def check_gifts(username):
         
         logger.info(f"🔍 Проверяю: {username}")
         
-        # --- ПРАВИЛЬНЫЙ СПОСОБ ПОЛУЧИТЬ PEER ---
         try:
-            # Получаем InputPeer через get_entity
             entity = await client.get_entity(username)
-            # Превращаем в InputPeer
-            input_peer = await client.get_input_entity(username)
         except Exception as e:
-            logger.error(f"❌ Ошибка получения пользователя {username}: {e}")
+            logger.error(f"❌ Ошибка получения {username}: {e}")
             return None, f"Не найден"
         
-        # --- ПРАВИЛЬНЫЙ ВЫЗОВ GetSavedStarGifts ---
+        # --- ПРАВИЛЬНЫЙ СПОСОБ: InputPeerUser ---
         try:
+            input_peer = InputPeerUser(
+                user_id=entity.id,
+                access_hash=entity.access_hash
+            )
+            
+            # Используем сырой invoke
             result = await client(functions.payments.GetSavedStarGiftsRequest(
-                peer=input_peer,  # ← ПЕРЕДАЕМ InputPeer
+                peer=input_peer,
                 offset=0,
                 limit=100,
                 exclude_unsaved=True,
