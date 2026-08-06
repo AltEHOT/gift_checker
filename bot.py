@@ -374,7 +374,7 @@ async def handle_new_message(event):
     thread.daemon = True
     thread.start()
 
-# --- ЗАПУСК TELEGRAM ---
+# --- ЗАПУСК TELEGRAM (ИСПРАВЛЕННЫЙ) ---
 
 def start_telethon():
     """Запускает Telethon клиент в отдельном потоке"""
@@ -389,8 +389,9 @@ def start_telethon():
         client.start()
         logger.info("✅ Telethon запущен")
         
-        # Получаем информацию об аккаунте
-        me = client.get_me()
+        # ПРАВИЛЬНЫЙ АСИНХРОННЫЙ ВЫЗОВ get_me()
+        me = loop.run_until_complete(client.get_me())
+        
         logger.info(f"👤 Аккаунт: @{me.username}")
         logger.info(f"📱 ID: {me.id}")
         logger.info(f"📛 Имя: {me.first_name} {me.last_name or ''}")
