@@ -81,7 +81,7 @@ def is_valid_username(text):
     text = text.strip()
     return re.match(r'^@[A-Za-z0-9_]{3,}$', text) is not None
 
-# --- ПРОВЕРКА ПОДАРКОВ (ИСПРАВЛЕННАЯ) ---
+# --- ПРОВЕРКА ПОДАРКОВ (ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ) ---
 async def check_gifts(username):
     global client, request_timestamps
     
@@ -95,14 +95,12 @@ async def check_gifts(username):
         
         logger.info(f"🔍 Проверяю: {username}")
         
-        # --- ПОЛУЧАЕМ InputPeer ---
         try:
             input_peer = await client.get_input_entity(username)
         except Exception as e:
             logger.error(f"❌ Ошибка получения {username}: {e}")
             return None, f"Не найден"
         
-        # --- ЗАПРАШИВАЕМ ВСЕ ПОДАРКИ (БЕЗ ФИЛЬТРОВ) ---
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
                 peer=input_peer,
@@ -111,7 +109,7 @@ async def check_gifts(username):
                 exclude_unsaved=False,
                 exclude_saved=False,
                 exclude_upgradable=False,
-                exclude_unupgradable=False  # ← УБРАЛИ ВСЕ ФИЛЬТРЫ
+                exclude_unupgradable=False
             ))
         except FloodWaitError as e:
             wait = e.seconds
@@ -122,16 +120,30 @@ async def check_gifts(username):
             logger.error(f"❌ Ошибка GetSavedStarGifts для {username}: {e}")
             return None, f"Ошибка API: {str(e)[:50]}"
         
-        # --- СЧИТАЕМ НЕУЛУЧШЕННЫЕ ВРУЧНУЮ ---
+        # --- ДИАГНОСТИКА: ВЫВОДИМ ВСЕ ПОЛЯ ПОДАРКОВ ---
         count = 0
         total = 0
         if result and result.gifts:
             for gift in result.gifts:
                 total += 1
-                # can_upgrade = True значит подарок НЕ УЛУЧШЕН
-                if gift.can_upgrade:
+                logger.info(f"   🎁 Подарок #{total}: {gift}")
+                logger.info(f"      Все атрибуты: {dir(gift)}")
+                
+                is_upgradable = False
+                if hasattr(gift, 'can_upgrade') and gift.can_upgrade:
+                    is_upgradable = True
+                    logger.info(f"      ✅ can_upgrade = True")
+                elif hasattr(gift, 'upgradable') and gift.upgradable:
+                    is_upgradable = True
+                    logger.info(f"      ✅ upgradable = True")
+                elif hasattr(gift, 'is_upgradable') and gift.is_upgradable:
+                    is_upgradable = True
+                    logger.info(f"      ✅ is_upgradable = True")
+                else:
+                    logger.info(f"      ❌ Нет поля can_upgrade/upgradable/is_upgradable")
+                
+                if is_upgradable:
                     count += 1
-                    logger.info(f"   🎁 Найден неулучшенный подарок для {username}")
         
         logger.info(f"📊 {username}: всего {total} подарков, из них неулучшенных: {count}")
         
