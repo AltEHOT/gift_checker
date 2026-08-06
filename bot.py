@@ -59,7 +59,7 @@ app = Flask(__name__)
 user_data = {}
 request_timestamps = []
 client_ready = False
-main_loop = None  # ← БУДЕМ ХРАНИТЬ ГЛАВНЫЙ LOOP
+main_loop = None
 
 # --- ЭНДПОИНТЫ ---
 @app.route('/', methods=['GET'])
@@ -179,6 +179,12 @@ async def process_batch_async(entity, user_id):
     usernames = data["usernames"]
     total = len(usernames)
     
+    # Отправляем первое сообщение о начале
+    await client.send_message(
+        entity,
+        f"🚀 Начинаю проверку {total} аккаунтов..."
+    )
+    
     for index, username in enumerate(usernames):
         if data.get("status") == "stopped":
             await client.send_message(entity, "⏹️ Проверка остановлена.")
@@ -193,9 +199,10 @@ async def process_batch_async(entity, user_id):
             )
             await asyncio.sleep(30)
         
-        progress_msg = await client.send_message(
+        # Отправляем прогресс
+        await client.send_message(
             entity,
-            f"⏳ {index + 1}/{total}\n🔄 Проверяю {username}..."
+            f"⏳ {index + 1}/{total} - Проверяю {username}..."
         )
         
         result, error = await check_user_gifts(username)
@@ -215,11 +222,6 @@ async def process_batch_async(entity, user_id):
                     f"ℹ️ **{username}**\n📦 Неулучшенных подарков: **0**"
                 )
         
-        try:
-            await progress_msg.delete()
-        except:
-            pass
-        
         await asyncio.sleep(random.uniform(2, 5))
     
     if data.get("status") != "stopped":
@@ -237,7 +239,6 @@ async def process_batch_async(entity, user_id):
     
     data["status"] = "finished"
 
-# ← ЭТО ИЗМЕНЕНО — ИСПОЛЬЗУЕМ ГЛОБАЛЬНЫЙ LOOP
 def run_batch_sync(entity, user_id):
     """Запускает асинхронную обработку в главном event loop"""
     global main_loop
@@ -246,10 +247,15 @@ def run_batch_sync(entity, user_id):
         return
     
     # Запускаем корутину в главном loop'е
-    asyncio.run_coroutine_threadsafe(
+    future = asyncio.run_coroutine_threadsafe(
         process_batch_async(entity, user_id),
         main_loop
     )
+    # Ждем завершения (чтобы убедиться, что все сообщения отправлены)
+    try:
+        future.result(timeout=300)  # 5 минут максимум
+    except Exception as e:
+        logger.error(f"❌ Ошибка в run_batch_sync: {e}")
 
 async def handle_new_message(event):
     """Обработчик входящих сообщений"""
@@ -371,11 +377,13 @@ async def handle_new_message(event):
             f"Для статистики: /stats"
         )
         
-        # ← ЗАПУСКАЕМ В ГЛАВНОМ LOOP (БЕЗ НОВОГО ПОТОКА)
-        asyncio.run_coroutine_threadsafe(
-            process_batch_async(entity, user_id),
-            main_loop
+        # Запускаем проверку в отдельном потоке с ожиданием
+        thread = threading.Thread(
+            target=run_batch_sync,
+            args=(entity, user_id)
         )
+        thread.daemon = True
+        thread.start()
         
     except Exception as e:
         logger.error(f"❌ Ошибка в handle_new_message: {e}")
@@ -392,7 +400,7 @@ async def handle_new_message(event):
 def start_telethon():
     global client_ready, main_loop
     
-    # ← СОХРАНЯЕМ ГЛАВНЫЙ LOOP
+    # СОХРАНЯЕМ ГЛАВНЫЙ LOOP
     main_loop = asyncio.get_running_loop()
     
     try:
@@ -401,7 +409,6 @@ def start_telethon():
         logger.info("✅ Telethon запущен")
         
         logger.info("🔄 Загружаю диалоги...")
-        # Используем main_loop для синхронного вызова
         dialogs = asyncio.run_coroutine_threadsafe(client.get_dialogs(), main_loop).result()
         logger.info(f"✅ Загружено {len(dialogs)} диалогов")
         
