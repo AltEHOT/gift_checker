@@ -81,7 +81,7 @@ def is_valid_username(text):
     text = text.strip()
     return re.match(r'^@[A-Za-z0-9_]{3,}$', text) is not None
 
-# --- ПРОВЕРКА ПОДАРКОВ (ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ) ---
+# --- ПРОВЕРКА ПОДАРКОВ (ФИНАЛЬНАЯ ВЕРСИЯ) ---
 async def check_gifts(username):
     global client, request_timestamps
     
@@ -120,29 +120,34 @@ async def check_gifts(username):
             logger.error(f"❌ Ошибка GetSavedStarGifts для {username}: {e}")
             return None, f"Ошибка API: {str(e)[:50]}"
         
-        # --- ДИАГНОСТИКА: ВСЕ ПОЛЯ ОБЪЕКТА ---
+        # --- ПРАВИЛЬНЫЙ ПОДСЧЕТ: используем upgrade_variants ---
         count = 0
         total = 0
         if result and result.gifts:
             for gift_obj in result.gifts:
                 total += 1
-                logger.info(f"   🎁 Подарок #{total}: {gift_obj}")
-                logger.info(f"      Все атрибуты: {dir(gift_obj)}")
                 
-                # Проверяем все возможные поля
-                for attr in dir(gift_obj):
-                    if not attr.startswith('_'):
-                        try:
-                            value = getattr(gift_obj, attr)
-                            if not callable(value):
-                                logger.info(f"      {attr} = {value}")
-                        except:
-                            pass
+                # Проверяем, можно ли улучшить подарок
+                can_upgrade = False
+                
+                # Способ 1: Проверяем upgrade_variants (если есть число > 0)
+                if hasattr(gift_obj, 'upgrade_variants') and gift_obj.upgrade_variants:
+                    can_upgrade = True
+                    logger.info(f"   ✅ Неулучшенный подарок #{total} (upgrade_variants={gift_obj.upgrade_variants})")
+                # Способ 2: Проверяем prepaid_upgrade_hash (если есть строка)
+                elif hasattr(gift_obj, 'prepaid_upgrade_hash') and gift_obj.prepaid_upgrade_hash:
+                    can_upgrade = True
+                    logger.info(f"   ✅ Неулучшенный подарок #{total} (есть prepaid_upgrade_hash)")
+                else:
+                    logger.info(f"   ❌ Уже улучшенный подарок #{total}")
+                
+                if can_upgrade:
+                    count += 1
         
-        logger.info(f"📊 {username}: всего {total} подарков")
+        logger.info(f"📊 {username}: всего {total} подарков, из них неулучшенных: {count}")
         
         request_timestamps.append(time.time())
-        return 0, None  # временно возвращаем 0
+        return count, None
         
     except Exception as e:
         logger.error(f"❌ Ошибка проверки {username}: {e}")
