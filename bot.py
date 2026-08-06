@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 API_ID = int(os.getenv("API_ID", 0))
 API_HASH = os.getenv("API_HASH", "")
 SESSION_NAME = "userbot_session"
-PORT = int(os.getenv("PORT", 5000))
+PORT = int(os.getenv("PORT", 8080))
 
 # --- НАСТРОЙКИ АНТИ-ФЛУДА ---
 MIN_DELAY = 2.0
