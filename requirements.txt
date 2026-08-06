@@ -2,3 +2,4 @@ pyrogram==2.0.106
 tgcrypto
 flask==2.3.3
 gunicorn==21.2.0
+nest-asyncio
