@@ -94,7 +94,6 @@ def stats():
 # --- ЛОГИКА ПРОВЕРКИ ПОДАРКОВ ---
 
 def can_make_request():
-    """Проверяет лимит запросов (20 в минуту)"""
     global request_timestamps
     now = time.time()
     request_timestamps = [t for t in request_timestamps if now - t < 60]
@@ -104,14 +103,10 @@ def can_make_request():
     return True, 0
 
 async def check_user_gifts(username):
-    """
-    Проверяет НЕУЛУЧШЕННЫЕ подарки у пользователя по @username
-    Возвращает: (количество_неулучшенных, ошибка)
-    """
+    """Проверяет НЕУЛУЧШЕННЫЕ подарки у пользователя по @username"""
     global client, request_timestamps
     
     try:
-        # Проверяем лимит запросов
         can_request, wait_time = can_make_request()
         if not can_request:
             await asyncio.sleep(wait_time)
@@ -125,26 +120,25 @@ async def check_user_gifts(username):
         except Exception as e:
             return None, f"Ошибка получения {username}: {e}"
         
-        # 2. ЗАПРАШИВАЕМ ЕГО ПОДАРКИ ЧЕРЕЗ MTProto API
+        # 2. ЗАПРАШИВАЕМ ЕГО ПОДАРКИ
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
                 peer=entity,
-                exclude_unsaved=True,      # Только сохраненные в профиле
+                exclude_unsaved=True,
                 exclude_saved=False,
-                exclude_upgradable=False,  # НЕ исключаем улучшаемые
-                exclude_unupgradable=True  # Исключаем НЕулучшаемые (оставляем только те, что можно улучшить)
+                exclude_upgradable=False,
+                exclude_unupgradable=True
             ))
         except RPCError as e:
             return None, f"Ошибка API: {e}"
         
-        # 3. СЧИТАЕМ НЕУЛУЧШЕННЫЕ ПОДАРКИ
+        # 3. СЧИТАЕМ НЕУЛУЧШЕННЫЕ (can_upgrade = True)
         upgradable_count = 0
         if result and result.gifts:
             for gift in result.gifts:
-                if gift.can_upgrade:  # can_upgrade = True значит подарок НЕ улучшен
+                if gift.can_upgrade:
                     upgradable_count += 1
         
-        # Запоминаем время запроса
         request_timestamps.append(time.time())
         return upgradable_count, None
         
@@ -172,14 +166,12 @@ async def process_batch_async(chat_id, user_id):
     total = len(usernames)
     
     for index, username in enumerate(usernames):
-        # Проверяем, не остановил ли пользователь
         if data.get("status") == "stopped":
             await client.send_message(chat_id, "⏹️ Проверка остановлена.")
             break
         
         data["index"] = index
         
-        # Пауза каждые 50 аккаунтов (анти-флуд)
         if index > 0 and index % 50 == 0:
             await client.send_message(
                 chat_id,
@@ -187,16 +179,13 @@ async def process_batch_async(chat_id, user_id):
             )
             await asyncio.sleep(30)
         
-        # Отправляем статус
         progress_msg = await client.send_message(
             chat_id,
             f"⏳ {index + 1}/{total}\n🔄 Проверяю {username}..."
         )
         
-        # Проверяем подарки
         result, error = await check_user_gifts(username)
         
-        # Отправляем результат
         if error:
             await client.send_message(chat_id, f"❌ **{username}**\n{error}")
         else:
@@ -212,16 +201,13 @@ async def process_batch_async(chat_id, user_id):
                     f"ℹ️ **{username}**\n📦 Неулучшенных подарков: **0**"
                 )
         
-        # Удаляем статусное сообщение
         try:
             await progress_msg.delete()
         except:
             pass
         
-        # Задержка между запросами (2-5 секунд)
         await asyncio.sleep(random.uniform(2, 5))
     
-    # Финальное сообщение
     if data.get("status") != "stopped":
         total_time = int(time.time() - data["start_time"])
         avg_time = total_time / total if total > 0 else 0
@@ -238,7 +224,6 @@ async def process_batch_async(chat_id, user_id):
     data["status"] = "finished"
 
 def run_batch_sync(chat_id, user_id):
-    """Синхронная обертка для запуска асинхронной обработки"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -257,7 +242,7 @@ async def handle_new_message(event):
             return
         
         user_id = event.sender_id
-        chat_id = event.chat_id
+        chat_id = event.chat_id  # ← ЭТО ID ЧАТА, КУДА ОТВЕЧАТЬ
         text = event.message.text
         
         if not text:
@@ -301,7 +286,6 @@ async def handle_new_message(event):
             return
         
         # --- ПАРСИНГ СПИСКА ---
-        # Если уже идет проверка
         if user_id in user_data and user_data[user_id].get("status") == "active":
             data = user_data[user_id]
             await client.send_message(
@@ -310,19 +294,16 @@ async def handle_new_message(event):
             )
             return
         
-        # Извлекаем все @username из сообщения
         lines = text.split('\n')
         usernames = []
         for line in lines:
             if '@' in line:
-                # Пробуем разные разделители
                 for sep in [' - ', '—', ' -', '- ', '\t']:
                     if sep in line:
                         username = line.split(sep)[0].strip()
                         break
                 else:
                     username = line.strip()
-                
                 if username.startswith('@'):
                     usernames.append(username)
         
@@ -344,7 +325,6 @@ async def handle_new_message(event):
             )
             return
         
-        # Сохраняем данные для проверки
         user_data[user_id] = {
             "usernames": usernames,
             "index": 0,
@@ -364,7 +344,6 @@ async def handle_new_message(event):
             f"Для статистики: /stats"
         )
         
-        # Запускаем проверку в отдельном потоке
         thread = threading.Thread(
             target=run_batch_sync, 
             args=(chat_id, user_id)
