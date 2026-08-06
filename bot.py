@@ -154,7 +154,7 @@ async def check_user_gifts(username):
         logger.error(f"❌ Ошибка проверки {username}: {e}")
         return None, str(e)
 
-async def process_batch_async(chat_id, user_id):
+async def process_batch_async(user_id):
     """Обрабатывает список аккаунтов"""
     global client, user_data
     
@@ -167,13 +167,13 @@ async def process_batch_async(chat_id, user_id):
     
     # Отправляем первое сообщение о начале
     try:
-        await client.send_message(chat_id, f"🚀 Начинаю проверку {total} аккаунтов...")
+        await client.send_message(user_id, f"🚀 Начинаю проверку {total} аккаунтов...")
     except Exception as e:
-        logger.error(f"❌ Не могу отправить стартовое сообщение: {e}")
+        logger.error(f"❌ Не могу отправить стартовое: {e}")
     
     for index, username in enumerate(usernames):
         if data.get("status") == "stopped":
-            await client.send_message(chat_id, "⏹️ Проверка остановлена.")
+            await client.send_message(user_id, "⏹️ Проверка остановлена.")
             break
         
         data["index"] = index
@@ -181,7 +181,7 @@ async def process_batch_async(chat_id, user_id):
         if index > 0 and index % 50 == 0:
             try:
                 await client.send_message(
-                    chat_id,
+                    user_id,
                     f"⏸️ Пауза 30 сек (обработано {index}/{total})"
                 )
             except:
@@ -191,7 +191,7 @@ async def process_batch_async(chat_id, user_id):
         # Отправляем прогресс
         try:
             await client.send_message(
-                chat_id,
+                user_id,
                 f"⏳ {index + 1}/{total} - Проверяю {username}..."
             )
         except Exception as e:
@@ -201,7 +201,7 @@ async def process_batch_async(chat_id, user_id):
         
         if error:
             try:
-                await client.send_message(chat_id, f"❌ **{username}**\n{error}")
+                await client.send_message(user_id, f"❌ **{username}**\n{error}")
             except:
                 pass
         else:
@@ -209,12 +209,12 @@ async def process_batch_async(chat_id, user_id):
                 if result > 0:
                     data['total_gifts'] = data.get('total_gifts', 0) + result
                     await client.send_message(
-                        chat_id, 
+                        user_id, 
                         f"✅ **{username}**\n📦 Неулучшенных подарков: **{result}**"
                     )
                 else:
                     await client.send_message(
-                        chat_id, 
+                        user_id, 
                         f"ℹ️ **{username}**\n📦 Неулучшенных подарков: **0**"
                     )
             except Exception as e:
@@ -227,7 +227,7 @@ async def process_batch_async(chat_id, user_id):
         avg_time = total_time / total if total > 0 else 0
         try:
             await client.send_message(
-                chat_id,
+                user_id,
                 f"✅ **Проверка завершена!**\n"
                 f"━━━━━━━━━━━━━━━━━\n"
                 f"📊 Всего проверено: **{total}** аккаунтов\n"
@@ -240,12 +240,12 @@ async def process_batch_async(chat_id, user_id):
     
     data["status"] = "finished"
 
-def run_batch_sync(chat_id, user_id):
+def run_batch_sync(user_id):
     """Запускает асинхронную обработку в новом event loop"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(process_batch_async(chat_id, user_id))
+        loop.run_until_complete(process_batch_async(user_id))
     except Exception as e:
         logger.error(f"❌ Ошибка в run_batch_sync: {e}")
         logger.error(traceback.format_exc())
@@ -262,7 +262,6 @@ async def handle_new_message(event):
             return
         
         user_id = event.sender_id
-        chat_id = event.chat_id  # ← ЭТО ID ЧАТА, КУДА ОТВЕЧАТЬ
         text = event.message.text
         
         if not text:
@@ -275,7 +274,7 @@ async def handle_new_message(event):
             if text.lower() in ["/stop", "стоп"]:
                 if user_id in user_data:
                     user_data[user_id]["status"] = "stopped"
-                    await client.send_message(chat_id, "⏹️ Проверка остановлена.")
+                    await client.send_message(user_id, "⏹️ Проверка остановлена.")
                 return
             
             if text.lower() in ["/stats", "статистика"]:
@@ -284,16 +283,16 @@ async def handle_new_message(event):
                     total = len(data["usernames"])
                     current = data.get("index", 0)
                     await client.send_message(
-                        chat_id,
+                        user_id,
                         f"📊 **Прогресс:** {current}/{total}\n🎁 Найдено: {data.get('total_gifts', 0)}"
                     )
                 else:
-                    await client.send_message(chat_id, "ℹ️ Нет активной проверки.")
+                    await client.send_message(user_id, "ℹ️ Нет активной проверки.")
                 return
             
             if text.lower() in ["/help", "помощь"]:
                 await client.send_message(
-                    chat_id,
+                    user_id,
                     "🤖 **Помощь**\n\n"
                     "Отправь список @username для проверки\n"
                     "Формат: @username1 - 1\n\n"
@@ -309,7 +308,7 @@ async def handle_new_message(event):
         if user_id in user_data and user_data[user_id].get("status") == "active":
             data = user_data[user_id]
             await client.send_message(
-                chat_id,
+                user_id,
                 f"⏳ Уже идет проверка: {data['index']}/{len(data['usernames'])}"
             )
             return
@@ -329,7 +328,7 @@ async def handle_new_message(event):
         
         if not usernames:
             await client.send_message(
-                chat_id, 
+                user_id, 
                 "❌ Не найдено @username\n\n"
                 "Отправь список в формате:\n"
                 "@username1 - 1\n"
@@ -339,7 +338,7 @@ async def handle_new_message(event):
         
         if len(usernames) > 200:
             await client.send_message(
-                chat_id, 
+                user_id, 
                 f"⚠️ Слишком много аккаунтов ({len(usernames)})\n"
                 f"Максимум: 200 за раз"
             )
@@ -350,12 +349,11 @@ async def handle_new_message(event):
             "index": 0,
             "status": "active",
             "start_time": time.time(),
-            "total_gifts": 0,
-            "chat_id": chat_id
+            "total_gifts": 0
         }
         
         await client.send_message(
-            chat_id,
+            user_id,
             f"✅ Получено {len(usernames)} аккаунтов.\n"
             f"⏱ Примерное время: ~{len(usernames) * 3} сек\n"
             f"🛡️ Защита от флуда: ВКЛ\n"
@@ -366,7 +364,7 @@ async def handle_new_message(event):
         
         thread = threading.Thread(
             target=run_batch_sync, 
-            args=(chat_id, user_id)
+            args=(user_id,)
         )
         thread.daemon = True
         thread.start()
@@ -375,8 +373,8 @@ async def handle_new_message(event):
         logger.error(f"❌ Ошибка в handle_new_message: {e}")
         logger.error(traceback.format_exc())
         try:
-            if 'chat_id' in locals():
-                await client.send_message(chat_id, f"❌ Внутренняя ошибка: {str(e)[:100]}")
+            if 'user_id' in locals():
+                await client.send_message(user_id, f"❌ Внутренняя ошибка: {str(e)[:100]}")
         except:
             pass
 
