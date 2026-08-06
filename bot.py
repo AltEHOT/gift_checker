@@ -9,6 +9,10 @@ from pyrogram import Client, filters
 from pyrogram.raw.functions.payments import GetSavedStarGifts
 from pyrogram.enums import ChatType
 from pyrogram.errors import FloodWait, RPCError
+import nest_asyncio
+
+# --- ПРИМЕНЯЕМ FIX ДЛЯ EVENT LOOP ---
+nest_asyncio.apply()
 
 # --- НАСТРОЙКА ЛОГОВ ---
 logging.basicConfig(
@@ -24,12 +28,12 @@ SESSION_NAME = "userbot_session"
 PORT = int(os.getenv("PORT", 5000))
 
 # --- НАСТРОЙКИ АНТИ-ФЛУДА ---
-MIN_DELAY = 2.0          # Минимальная задержка между запросами (сек)
-MAX_DELAY = 5.0          # Максимальная задержка между запросами (сек)
-MAX_REQUESTS_PER_MINUTE = 20  # Максимум запросов в минуту
-BATCH_SIZE = 50          # После скольких аккаунтов делать паузу
-BATCH_PAUSE = 30         # Пауза после BATCH_SIZE аккаунтов (сек)
-MAX_RETRIES = 3          # Сколько раз повторять при ошибке
+MIN_DELAY = 2.0
+MAX_DELAY = 5.0
+MAX_REQUESTS_PER_MINUTE = 20
+BATCH_SIZE = 50
+BATCH_PAUSE = 30
+MAX_RETRIES = 3
 
 # --- ПРОВЕРКА ---
 if not API_ID or not API_HASH:
@@ -45,15 +49,14 @@ pyro_client = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     workdir=".",
-    # Дополнительные настройки для снижения нагрузки
-    sleep_threshold=30,  # Автоматическая задержка при флуде
-    no_updates=True,     # Отключаем обработку обновлений (экономит ресурсы)
-    in_memory=False      # Храним сессию на диске
+    sleep_threshold=30,
+    no_updates=True,
+    in_memory=False
 )
 
 # --- ХРАНИЛИЩЕ ---
 user_data = {}
-request_timestamps = []  # Для отслеживания частоты запросов
+request_timestamps = []
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
@@ -61,7 +64,6 @@ def can_make_request():
     """Проверяет, не превышен ли лимит запросов"""
     global request_timestamps
     now = time.time()
-    # Удаляем старые записи (старше 60 секунд)
     request_timestamps = [t for t in request_timestamps if now - t < 60]
     
     if len(request_timestamps) >= MAX_REQUESTS_PER_MINUTE:
@@ -78,11 +80,8 @@ def get_delay():
 # --- ОСНОВНАЯ ЛОГИКА ---
 
 async def safe_request(chat_id, user_id, username, retry_count=0):
-    """
-    Безопасный запрос с обработкой всех ошибок
-    """
+    """Безопасный запрос с обработкой всех ошибок"""
     try:
-        # 1. Проверяем лимит запросов
         can_request, wait_time = can_make_request()
         if not can_request:
             await pyro_client.send_message(
@@ -92,11 +91,9 @@ async def safe_request(chat_id, user_id, username, retry_count=0):
             await asyncio.sleep(wait_time)
             return await safe_request(chat_id, user_id, username, retry_count)
         
-        # 2. Получаем пользователя
         entity = await pyro_client.get_users(username)
         peer = await pyro_client.resolve_peer(entity.id)
         
-        # 3. Запрашиваем подарки
         gifts_result = await pyro_client.invoke(
             GetSavedStarGifts(
                 peer=peer,
@@ -107,33 +104,27 @@ async def safe_request(chat_id, user_id, username, retry_count=0):
             )
         )
         
-        # 4. Считаем неулучшенные
         upgradable_count = 0
         if gifts_result and hasattr(gifts_result, 'gifts'):
             for gift in gifts_result.gifts:
                 if hasattr(gift, 'can_upgrade') and gift.can_upgrade:
                     upgradable_count += 1
         
-        # 5. Запоминаем время запроса
         request_timestamps.append(time.time())
-        
-        # 6. Возвращаем результат
         return upgradable_count, None
         
     except FloodWait as e:
         wait_time = e.value
         logger.warning(f"⏳ FloodWait: {wait_time} сек для {username}")
         
-        # Если ждать больше 60 секунд - уведомляем пользователя
         if wait_time > 60:
             await pyro_client.send_message(
                 chat_id,
-                f"⚠️ Telegram просит подождать {wait_time} секунд из-за лимитов..."
+                f"⚠️ Telegram просит подождать {wait_time} секунд..."
             )
         
         await asyncio.sleep(wait_time)
         
-        # Пробуем снова
         if retry_count < MAX_RETRIES:
             return await safe_request(chat_id, user_id, username, retry_count + 1)
         else:
@@ -157,7 +148,6 @@ async def process_next_account(chat_id, user_id):
     index = data["index"]
 
     if index >= len(usernames):
-        # Финальное сообщение
         total_time = int(time.time() - data["start_time"])
         avg_time = total_time / len(usernames) if len(usernames) > 0 else 0
         
@@ -174,14 +164,12 @@ async def process_next_account(chat_id, user_id):
         data["status"] = "finished"
         data["end_time"] = time.time()
         
-        # Очищаем данные через 5 минут (чтобы не накапливать)
         asyncio.create_task(clear_data_after_delay(user_id, 300))
         return
 
     username = usernames[index]
     progress = f"⏳ Прогресс: {index + 1}/{len(usernames)}"
     
-    # Проверка на паузу между батчами
     if index > 0 and index % BATCH_SIZE == 0:
         await pyro_client.send_message(
             chat_id,
@@ -190,13 +178,11 @@ async def process_next_account(chat_id, user_id):
         logger.info(f"⏸️ Батч-пауза: {BATCH_PAUSE} сек")
         await asyncio.sleep(BATCH_PAUSE)
     
-    # Отправляем статус
     status_msg = await pyro_client.send_message(
         chat_id, 
         f"{progress}\n🔄 Проверяю {username}..."
     )
     
-    # Делаем запрос с защитой
     result, error = await safe_request(chat_id, user_id, username)
     
     if error:
@@ -206,7 +192,6 @@ async def process_next_account(chat_id, user_id):
         )
         logger.error(f"❌ {username}: {error}")
     else:
-        # Обновляем счетчик найденных подарков
         if result > 0:
             data['total_gifts'] = data.get('total_gifts', 0) + result
             result_text = f"✅ **{username}**\n📦 Неулучшенных подарков: **{result}**"
@@ -216,17 +201,14 @@ async def process_next_account(chat_id, user_id):
         await pyro_client.send_message(chat_id, result_text)
         logger.info(f"✅ {username}: {result} gifts ({index + 1}/{len(usernames)})")
     
-    # Удаляем статусное сообщение
     try:
         await status_msg.delete()
     except:
         pass
     
-    # Задержка между запросами (случайная)
     delay = get_delay()
     await asyncio.sleep(delay)
     
-    # Переходим к следующему
     data["index"] = index + 1
     await process_next_account(chat_id, user_id)
 
@@ -256,11 +238,12 @@ async def handle_new_message(client, message):
             return
         
         if text.lower() in ["/stats", "статистика"]:
-            if user_id in user_data:
+            if user_id in user_data and user_data[user_id].get("status") != "finished":
                 data = user_data[user_id]
                 total = len(data["usernames"])
                 current = data["index"]
                 gifts = data.get('total_gifts', 0)
+                elapsed = int(time.time() - data["start_time"])
                 await pyro_client.send_message(
                     chat_id,
                     f"📊 **Статистика проверки**\n"
@@ -268,13 +251,12 @@ async def handle_new_message(client, message):
                     f"📦 Всего: {total}\n"
                     f"🔄 Обработано: {current}/{total}\n"
                     f"🎁 Найдено подарков: {gifts}\n"
-                    f"⏱ Время: {int(time.time() - data['start_time'])} сек"
+                    f"⏱ Прошло: {elapsed} сек"
                 )
             else:
                 await pyro_client.send_message(chat_id, "ℹ️ Нет активной проверки.")
             return
         
-        # Команда /help
         if text.lower() in ["/help", "помощь"]:
             await pyro_client.send_message(
                 chat_id,
@@ -295,7 +277,6 @@ async def handle_new_message(client, message):
     # --- ОБРАБОТКА СПИСКА ---
     logger.info(f"📩 Сообщение от {user_id}: {text[:50]}...")
 
-    # Проверка на активную обработку
     if user_id in user_data and user_data[user_id].get("status") != "finished":
         data = user_data[user_id]
         await pyro_client.send_message(
@@ -306,12 +287,10 @@ async def handle_new_message(client, message):
         )
         return
 
-    # Парсим список
     lines = text.strip().split('\n')
     usernames = []
     for line in lines:
         if '@' in line:
-            # Разные форматы разделителей
             for separator in [' - ', '—', ' -', '- ', '\t']:
                 if separator in line:
                     username = line.split(separator)[0].strip()
@@ -333,7 +312,6 @@ async def handle_new_message(client, message):
         )
         return
 
-    # Проверяем размер списка
     if len(usernames) > 200:
         await pyro_client.send_message(
             chat_id,
@@ -343,8 +321,7 @@ async def handle_new_message(client, message):
         )
         return
 
-    # Сохраняем данные
-    estimated_time = len(usernames) * 3  # ~3 секунды на аккаунт с задержками
+    estimated_time = len(usernames) * 3
     user_data[user_id] = {
         "usernames": usernames,
         "index": 0,
@@ -364,7 +341,6 @@ async def handle_new_message(client, message):
         f"Для статистики: /stats"
     )
 
-    # Запускаем обработку
     await process_next_account(chat_id, user_id)
 
 # --- FLASK ЭНДПОИНТЫ ---
@@ -415,7 +391,6 @@ def stats():
 
 @app.route('/clear', methods=['POST'])
 def clear_finished():
-    """Очищает завершенные проверки"""
     finished = [uid for uid, data in user_data.items() if data.get("status") == "finished"]
     for uid in finished:
         del user_data[uid]
@@ -424,31 +399,46 @@ def clear_finished():
         "remaining": len(user_data)
     })
 
-# --- ЗАПУСК PYROGRAM ---
+# --- ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА ---
 
 def run_pyrogram():
-    """Запускает клиент в отдельном потоке"""
-    @pyro_client.on_message(filters.private & filters.text)
-    async def message_handler(client, message):
-        await handle_new_message(client, message)
-
+    """Запускает клиент в отдельном потоке с корректным event loop"""
     try:
+        # Создаем новый event loop для этого потока
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        @pyro_client.on_message(filters.private & filters.text)
+        async def message_handler(client, message):
+            await handle_new_message(client, message)
+
         logger.info("🚀 Запуск Pyrogram с защитой от флуда...")
         logger.info(f"📊 Настройки: задержка {MIN_DELAY}-{MAX_DELAY}с, батч {BATCH_SIZE}")
         pyro_client.run()
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка в Pyrogram: {e}")
 
-# Запускаем Pyrogram в потоке
-pyro_thread = threading.Thread(target=run_pyrogram, daemon=True)
-pyro_thread.start()
-
-time.sleep(2)
-logger.info("✅ Клиент запущен")
-
-# --- ЗАПУСК FLASK ---
-
-if __name__ == "__main__":
+def main():
+    """Главная функция запуска"""
+    # Запускаем Pyrogram в отдельном потоке
+    pyro_thread = threading.Thread(target=run_pyrogram, daemon=True)
+    pyro_thread.start()
+    
+    # Даем время на запуск клиента
+    time.sleep(3)
+    logger.info("✅ Клиент запущен")
+    
+    # Запускаем Flask в основном потоке
     logger.info(f"🌐 Flask на порту {PORT}")
     logger.info("📊 Для статистики: /stats")
     app.run(host='0.0.0.0', port=PORT)
+
+if __name__ == "__main__":
+    # Устанавливаем корректный event loop для основного потока
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    main()
