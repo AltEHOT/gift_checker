@@ -8,9 +8,10 @@ import base64
 import traceback
 import re
 from flask import Flask, jsonify
-from telethon import TelegramClient, events, functions
-from telethon.errors import FloodWaitError, RPCError
+from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
+from telethon.tl.functions.payments import GetSavedStarGiftsRequest
 
 # --- НАСТРОЙКА ЛОГОВ ---
 logging.basicConfig(
@@ -81,14 +82,12 @@ def is_valid_username(text):
     text = text.strip()
     return re.match(r'^@[A-Za-z0-9_]{3,}$', text) is not None
 
-# --- ПРОВЕРКА ПОДАРКОВ (ИСПРАВЛЕННАЯ) ---
+# --- ПРОВЕРКА ПОДАРКОВ (ЧЕРЕЗ client.invoke) ---
 async def check_gifts(username):
     global client, request_timestamps
     
     try:
-        # --- ПРИНУДИТЕЛЬНО СТРОКА ---
         username = str(username).strip()
-        
         if username.startswith('@'):
             username = username[1:]
         
@@ -97,24 +96,25 @@ async def check_gifts(username):
         
         logger.info(f"🔍 Проверяю: {username}")
         
-        # --- ПРОВЕРЯЕМ, ЧТО ПОЛЬЗОВАТЕЛЬ СУЩЕСТВУЕТ ---
+        # Проверяем, что пользователь существует
         try:
-            entity = await client.get_entity(username)
+            await client.get_entity(username)
         except Exception as e:
-            logger.error(f"❌ Ошибка получения {username}: {e}")
+            logger.error(f"❌ Пользователь {username} не найден: {e}")
             return None, f"Не найден"
         
-        # --- ПЕРЕДАЕМ СТРОКУ (ЮЗЕРНЕЙМ) КАК PEER ---
+        # --- ИСПОЛЬЗУЕМ client.invoke() ---
         try:
-            result = await client(functions.payments.GetSavedStarGiftsRequest(
-                peer=username,  # ← ПРОСТО СТРОКА!
+            request = GetSavedStarGiftsRequest(
+                peer=username,  # строка
                 offset=0,
                 limit=100,
                 exclude_unsaved=True,
                 exclude_saved=False,
                 exclude_upgradable=False,
                 exclude_unupgradable=True
-            ))
+            )
+            result = await client.invoke(request)
         except FloodWaitError as e:
             wait = e.seconds
             logger.warning(f"⏳ FloodWait {wait} сек для {username}")
