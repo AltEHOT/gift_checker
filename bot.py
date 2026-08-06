@@ -91,6 +91,25 @@ def stats():
         "finished": len([u for u in user_data.items() if u[1].get("status") == "finished"])
     })
 
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ENTITY ---
+
+async def get_entity_safe(user_id):
+    """Безопасно получает entity пользователя"""
+    global client
+    try:
+        # Пробуем получить напрямую
+        return await client.get_entity(user_id)
+    except Exception as e:
+        logger.warning(f"⚠️ Не могу получить entity напрямую: {e}")
+        # Загружаем диалоги и пробуем снова
+        logger.info("🔄 Загружаю диалоги...")
+        await client.get_dialogs()
+        try:
+            return await client.get_entity(user_id)
+        except Exception as e2:
+            logger.error(f"❌ Не могу найти пользователя {user_id}: {e2}")
+            return None
+
 # --- ЛОГИКА ПРОВЕРКИ ПОДАРКОВ ---
 
 def can_make_request():
@@ -154,7 +173,7 @@ async def check_user_gifts(username):
         logger.error(f"❌ Ошибка проверки {username}: {e}")
         return None, str(e)
 
-async def process_batch_async(chat_id, user_id):
+async def process_batch_async(entity, user_id):
     """Обрабатывает список аккаунтов"""
     global client, user_data
     
@@ -167,37 +186,37 @@ async def process_batch_async(chat_id, user_id):
     
     for index, username in enumerate(usernames):
         if data.get("status") == "stopped":
-            await client.send_message(chat_id, "⏹️ Проверка остановлена.")
+            await client.send_message(entity, "⏹️ Проверка остановлена.")
             break
         
         data["index"] = index
         
         if index > 0 and index % 50 == 0:
             await client.send_message(
-                chat_id,
+                entity,
                 f"⏸️ Пауза 30 сек (обработано {index}/{total})"
             )
             await asyncio.sleep(30)
         
         progress_msg = await client.send_message(
-            chat_id,
+            entity,
             f"⏳ {index + 1}/{total}\n🔄 Проверяю {username}..."
         )
         
         result, error = await check_user_gifts(username)
         
         if error:
-            await client.send_message(chat_id, f"❌ **{username}**\n{error}")
+            await client.send_message(entity, f"❌ **{username}**\n{error}")
         else:
             if result > 0:
                 data['total_gifts'] = data.get('total_gifts', 0) + result
                 await client.send_message(
-                    chat_id, 
+                    entity, 
                     f"✅ **{username}**\n📦 Неулучшенных подарков: **{result}**"
                 )
             else:
                 await client.send_message(
-                    chat_id, 
+                    entity, 
                     f"ℹ️ **{username}**\n📦 Неулучшенных подарков: **0**"
                 )
         
@@ -212,7 +231,7 @@ async def process_batch_async(chat_id, user_id):
         total_time = int(time.time() - data["start_time"])
         avg_time = total_time / total if total > 0 else 0
         await client.send_message(
-            chat_id,
+            entity,
             f"✅ **Проверка завершена!**\n"
             f"━━━━━━━━━━━━━━━━━\n"
             f"📊 Всего проверено: **{total}** аккаунтов\n"
@@ -223,11 +242,11 @@ async def process_batch_async(chat_id, user_id):
     
     data["status"] = "finished"
 
-def run_batch_sync(chat_id, user_id):
+def run_batch_sync(entity, user_id):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(process_batch_async(chat_id, user_id))
+        loop.run_until_complete(process_batch_async(entity, user_id))
     except Exception as e:
         logger.error(f"❌ Ошибка в run_batch_sync: {e}")
         logger.error(traceback.format_exc())
@@ -242,7 +261,7 @@ async def handle_new_message(event):
             return
         
         user_id = event.sender_id
-        chat_id = event.chat_id  # ← ЭТО ID ЧАТА, КУДА ОТВЕЧАТЬ
+        chat_id = event.chat_id
         text = event.message.text
         
         if not text:
@@ -250,12 +269,23 @@ async def handle_new_message(event):
         
         logger.info(f"📩 Сообщение от {user_id}: {text[:50]}...")
         
+        # --- ПОЛУЧАЕМ ENTITY ПОЛЬЗОВАТЕЛЯ ---
+        entity = await get_entity_safe(user_id)
+        if not entity:
+            logger.error(f"❌ Не могу найти entity для {user_id}")
+            # Пробуем отправить по chat_id (на всякий случай)
+            try:
+                await client.send_message(chat_id, "❌ Ошибка идентификации, попробуй еще раз")
+            except:
+                pass
+            return
+        
         # --- КОМАНДЫ ---
         if text.startswith('/'):
             if text.lower() in ["/stop", "стоп"]:
                 if user_id in user_data:
                     user_data[user_id]["status"] = "stopped"
-                    await client.send_message(chat_id, "⏹️ Проверка остановлена.")
+                    await client.send_message(entity, "⏹️ Проверка остановлена.")
                 return
             
             if text.lower() in ["/stats", "статистика"]:
@@ -264,16 +294,16 @@ async def handle_new_message(event):
                     total = len(data["usernames"])
                     current = data.get("index", 0)
                     await client.send_message(
-                        chat_id,
+                        entity,
                         f"📊 **Прогресс:** {current}/{total}\n🎁 Найдено: {data.get('total_gifts', 0)}"
                     )
                 else:
-                    await client.send_message(chat_id, "ℹ️ Нет активной проверки.")
+                    await client.send_message(entity, "ℹ️ Нет активной проверки.")
                 return
             
             if text.lower() in ["/help", "помощь"]:
                 await client.send_message(
-                    chat_id,
+                    entity,
                     "🤖 **Помощь**\n\n"
                     "Отправь список @username для проверки\n"
                     "Формат: @username1 - 1\n\n"
@@ -289,7 +319,7 @@ async def handle_new_message(event):
         if user_id in user_data and user_data[user_id].get("status") == "active":
             data = user_data[user_id]
             await client.send_message(
-                chat_id,
+                entity,
                 f"⏳ Уже идет проверка: {data['index']}/{len(data['usernames'])}"
             )
             return
@@ -309,7 +339,7 @@ async def handle_new_message(event):
         
         if not usernames:
             await client.send_message(
-                chat_id, 
+                entity, 
                 "❌ Не найдено @username\n\n"
                 "Отправь список в формате:\n"
                 "@username1 - 1\n"
@@ -319,7 +349,7 @@ async def handle_new_message(event):
         
         if len(usernames) > 200:
             await client.send_message(
-                chat_id, 
+                entity, 
                 f"⚠️ Слишком много аккаунтов ({len(usernames)})\n"
                 f"Максимум: 200 за раз"
             )
@@ -331,11 +361,11 @@ async def handle_new_message(event):
             "status": "active",
             "start_time": time.time(),
             "total_gifts": 0,
-            "chat_id": chat_id
+            "entity": entity
         }
         
         await client.send_message(
-            chat_id,
+            entity,
             f"✅ Получено {len(usernames)} аккаунтов.\n"
             f"⏱ Примерное время: ~{len(usernames) * 3} сек\n"
             f"🛡️ Защита от флуда: ВКЛ\n"
@@ -346,7 +376,7 @@ async def handle_new_message(event):
         
         thread = threading.Thread(
             target=run_batch_sync, 
-            args=(chat_id, user_id)
+            args=(entity, user_id)
         )
         thread.daemon = True
         thread.start()
@@ -355,8 +385,10 @@ async def handle_new_message(event):
         logger.error(f"❌ Ошибка в handle_new_message: {e}")
         logger.error(traceback.format_exc())
         try:
-            if 'chat_id' in locals():
-                await client.send_message(chat_id, f"❌ Внутренняя ошибка: {str(e)[:100]}")
+            if 'entity' in locals() and entity:
+                await client.send_message(entity, f"❌ Внутренняя ошибка: {str(e)[:100]}")
+            elif 'chat_id' in locals():
+                await client.send_message(chat_id, f"❌ Ошибка: {str(e)[:100]}")
         except:
             pass
 
@@ -371,6 +403,11 @@ def start_telethon():
         logger.info("🚀 Запуск Telethon...")
         client.start()
         logger.info("✅ Telethon запущен")
+        
+        # Загружаем диалоги при старте
+        logger.info("🔄 Загружаю диалоги...")
+        dialogs = loop.run_until_complete(client.get_dialogs())
+        logger.info(f"✅ Загружено {len(dialogs)} диалогов")
         
         me = loop.run_until_complete(client.get_me())
         logger.info(f"👤 Аккаунт: @{me.username}")
