@@ -6,6 +6,7 @@ import logging
 import asyncio
 import base64
 import traceback
+import re
 from flask import Flask, jsonify
 from telethon import TelegramClient, events, functions
 from telethon.errors import FloodWaitError, RPCError
@@ -73,6 +74,15 @@ def index():
 def health():
     return jsonify({"status": "alive", "client_ready": client_ready}), 200
 
+# --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ, ЧТО ЭТО ЮЗЕРНЕЙМ ---
+def is_valid_username(text):
+    """Проверяет, что текст похож на юзернейм"""
+    if not text or not isinstance(text, str):
+        return False
+    text = text.strip()
+    # Должен начинаться с @ и содержать только буквы, цифры, подчеркивание
+    return re.match(r'^@[A-Za-z0-9_]{3,}$', text) is not None
+
 # --- ПРОВЕРКА ПОДАРКОВ ---
 async def check_gifts(username):
     """Проверяет неулучшенные подарки у пользователя"""
@@ -86,6 +96,10 @@ async def check_gifts(username):
         
         if not username:
             return None, "Пустой username"
+        
+        # Проверяем, что это не число
+        if username.isdigit():
+            return None, "Это число, а не юзернейм"
         
         logger.info(f"🔍 Проверяю: {username}")
         
@@ -198,10 +212,11 @@ async def handler(event):
                 else:
                     username = line.strip()
                 
-                # ПРИВОДИМ К СТРОКЕ И ПРОВЕРЯЕМ
-                username = str(username).strip()
-                if username.startswith('@') and len(username) > 1:
+                # ПРОВЕРЯЕМ, ЧТО ЭТО ВАЛИДНЫЙ ЮЗЕРНЕЙМ
+                if is_valid_username(username):
                     usernames.append(username)
+                else:
+                    logger.warning(f"⚠️ Пропускаю невалидный username: {username}")
         
         if not usernames:
             await event.reply(
