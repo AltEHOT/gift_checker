@@ -81,7 +81,7 @@ def is_valid_username(text):
     text = text.strip()
     return re.match(r'^@[A-Za-z0-9_]{3,}$', text) is not None
 
-# --- ПРОВЕРКА ПОДАРКОВ (ИСПРАВЛЕННАЯ) ---
+# --- ПРОВЕРКА ПОДАРКОВ (ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ) ---
 async def check_gifts(username):
     global client, request_timestamps
     
@@ -120,25 +120,29 @@ async def check_gifts(username):
             logger.error(f"❌ Ошибка GetSavedStarGifts для {username}: {e}")
             return None, f"Ошибка API: {str(e)[:50]}"
         
-        # --- ПРАВИЛЬНЫЙ ПОДСЧЕТ: поле внутри gift.gift ---
+        # --- ДИАГНОСТИКА: ВСЕ ПОЛЯ ОБЪЕКТА ---
         count = 0
         total = 0
         if result and result.gifts:
             for gift_obj in result.gifts:
                 total += 1
-                if hasattr(gift_obj, 'gift') and hasattr(gift_obj.gift, 'can_upgrade'):
-                    if gift_obj.gift.can_upgrade:
-                        count += 1
-                        logger.info(f"   ✅ Неулучшенный подарок #{total}")
-                    else:
-                        logger.info(f"   ❌ Уже улучшенный подарок #{total}")
-                else:
-                    logger.info(f"   ⚠️ Неизвестная структура подарка #{total}")
+                logger.info(f"   🎁 Подарок #{total}: {gift_obj}")
+                logger.info(f"      Все атрибуты: {dir(gift_obj)}")
+                
+                # Проверяем все возможные поля
+                for attr in dir(gift_obj):
+                    if not attr.startswith('_'):
+                        try:
+                            value = getattr(gift_obj, attr)
+                            if not callable(value):
+                                logger.info(f"      {attr} = {value}")
+                        except:
+                            pass
         
-        logger.info(f"📊 {username}: всего {total} подарков, из них неулучшенных: {count}")
+        logger.info(f"📊 {username}: всего {total} подарков")
         
         request_timestamps.append(time.time())
-        return count, None
+        return 0, None  # временно возвращаем 0
         
     except Exception as e:
         logger.error(f"❌ Ошибка проверки {username}: {e}")
