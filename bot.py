@@ -81,7 +81,7 @@ def is_valid_username(text):
     text = text.strip()
     return re.match(r'^@[A-Za-z0-9_]{3,}$', text) is not None
 
-# --- ПРОВЕРКА ПОДАРКОВ ---
+# --- ПРОВЕРКА ПОДАРКОВ (ИСПРАВЛЕННАЯ) ---
 async def check_gifts(username):
     global client, request_timestamps
     
@@ -95,16 +95,20 @@ async def check_gifts(username):
         
         logger.info(f"🔍 Проверяю: {username}")
         
+        # --- ПРАВИЛЬНЫЙ СПОСОБ ПОЛУЧИТЬ PEER ---
         try:
+            # Получаем InputPeer через get_entity
             entity = await client.get_entity(username)
+            # Превращаем в InputPeer
+            input_peer = await client.get_input_entity(username)
         except Exception as e:
-            logger.error(f"❌ Ошибка get_entity {username}: {e}")
+            logger.error(f"❌ Ошибка получения пользователя {username}: {e}")
             return None, f"Не найден"
         
-        # --- ИСПРАВЛЕННЫЙ ВЫЗОВ: ПЕРЕДАЕМ ID ---
+        # --- ПРАВИЛЬНЫЙ ВЫЗОВ GetSavedStarGifts ---
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
-                peer=entity.id,  # ← ПЕРЕДАЕМ ЧИСЛОВОЙ ID
+                peer=input_peer,  # ← ПЕРЕДАЕМ InputPeer
                 offset=0,
                 limit=100,
                 exclude_unsaved=True,
