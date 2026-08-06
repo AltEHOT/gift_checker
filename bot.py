@@ -59,7 +59,6 @@ app = Flask(__name__)
 user_data = {}
 request_timestamps = []
 client_ready = False
-main_loop = None  # ← ХРАНИМ ГЛАВНЫЙ EVENT LOOP
 
 # --- ЭНДПОИНТЫ ---
 @app.route('/', methods=['GET'])
@@ -113,7 +112,6 @@ async def check_user_gifts(username):
             await asyncio.sleep(wait_time)
             return await check_user_gifts(username)
         
-        # 1. ПОЛУЧАЕМ ПОЛЬЗОВАТЕЛЯ ПО ЮЗЕРНЕЙМУ
         try:
             entity = await client.get_entity(username)
         except ValueError:
@@ -121,7 +119,6 @@ async def check_user_gifts(username):
         except Exception as e:
             return None, f"Ошибка получения {username}: {e}"
         
-        # 2. ЗАПРАШИВАЕМ ЕГО ПОДАРКИ
         try:
             result = await client(functions.payments.GetSavedStarGiftsRequest(
                 peer=entity,
@@ -133,7 +130,6 @@ async def check_user_gifts(username):
         except RPCError as e:
             return None, f"Ошибка API: {e}"
         
-        # 3. СЧИТАЕМ НЕУЛУЧШЕННЫЕ
         upgradable_count = 0
         if result and result.gifts:
             for gift in result.gifts:
@@ -156,7 +152,7 @@ async def check_user_gifts(username):
         return None, str(e)
 
 async def process_batch_async(event, user_id):
-    """Обрабатывает список аккаунтов"""
+    """Обрабатывает список аккаунтов (АСИНХРОННО, в том же потоке)"""
     global client, user_data
     
     data = user_data.get(user_id)
@@ -166,7 +162,6 @@ async def process_batch_async(event, user_id):
     usernames = data["usernames"]
     total = len(usernames)
     
-    # Отправляем первое сообщение о начале
     try:
         await event.reply(f"🚀 Начинаю проверку {total} аккаунтов...")
     except Exception as e:
@@ -186,7 +181,6 @@ async def process_batch_async(event, user_id):
                 pass
             await asyncio.sleep(30)
         
-        # Отправляем прогресс
         try:
             await event.reply(f"⏳ {index + 1}/{total} - Проверяю {username}...")
         except Exception as e:
@@ -232,26 +226,12 @@ async def process_batch_async(event, user_id):
     
     data["status"] = "finished"
 
-# --- НОВАЯ ВЕРСИЯ ЗАПУСКА (без создания нового loop) ---
-def run_batch_sync(event, user_id):
-    """Запускает асинхронную обработку в главном event loop"""
-    global main_loop
-    if main_loop is None:
-        logger.error("❌ main_loop не инициализирован!")
-        return
-    
-    # Запускаем корутину в главном loop'е
-    asyncio.run_coroutine_threadsafe(
-        process_batch_async(event, user_id),
-        main_loop
-    )
-
+# --- ОБРАБОТЧИК СООБЩЕНИЙ (ВСЕ В ОДНОМ ПОТОКЕ) ---
 async def handle_new_message(event):
-    """Обработчик входящих сообщений"""
+    """Обработчик входящих сообщений (ВСЁ В ОДНОМ ПОТОКЕ)"""
     global client, user_data
     
     try:
-        # Только личные сообщения
         if not event.is_private:
             return
         
@@ -350,13 +330,8 @@ async def handle_new_message(event):
             f"Для статистики: /stats"
         )
         
-        # Запускаем проверку в отдельном потоке (без создания нового loop)
-        thread = threading.Thread(
-            target=run_batch_sync, 
-            args=(event, user_id)
-        )
-        thread.daemon = True
-        thread.start()
+        # ← ЗАПУСКАЕМ ПРОВЕРКУ ПРЯМО ЗДЕСЬ (В ТОМ ЖЕ ПОТОКЕ)
+        await process_batch_async(event, user_id)
         
     except Exception as e:
         logger.error(f"❌ Ошибка в handle_new_message: {e}")
@@ -368,17 +343,17 @@ async def handle_new_message(event):
 
 # --- ЗАПУСК TELEGRAM ---
 def start_telethon():
-    global client_ready, main_loop
+    global client_ready
     
-    # СОХРАНЯЕМ ГЛАВНЫЙ LOOP
-    main_loop = asyncio.get_running_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
     try:
         logger.info("🚀 Запуск Telethon...")
         client.start()
         logger.info("✅ Telethon запущен")
         
-        me = client.get_me()
+        me = loop.run_until_complete(client.get_me())
         logger.info(f"👤 Аккаунт: @{me.username}")
         logger.info(f"📱 ID: {me.id}")
         client_ready = True
