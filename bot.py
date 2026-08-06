@@ -81,7 +81,7 @@ def is_valid_username(text):
     text = text.strip()
     return re.match(r'^@[A-Za-z0-9_]{3,}$', text) is not None
 
-# --- ПРОВЕРКА ПОДАРКОВ (ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ) ---
+# --- ПРОВЕРКА ПОДАРКОВ (ИСПРАВЛЕННАЯ) ---
 async def check_gifts(username):
     global client, request_timestamps
     
@@ -120,30 +120,20 @@ async def check_gifts(username):
             logger.error(f"❌ Ошибка GetSavedStarGifts для {username}: {e}")
             return None, f"Ошибка API: {str(e)[:50]}"
         
-        # --- ДИАГНОСТИКА: ВЫВОДИМ ВСЕ ПОЛЯ ПОДАРКОВ ---
+        # --- ПРАВИЛЬНЫЙ ПОДСЧЕТ: поле внутри gift.gift ---
         count = 0
         total = 0
         if result and result.gifts:
-            for gift in result.gifts:
+            for gift_obj in result.gifts:
                 total += 1
-                logger.info(f"   🎁 Подарок #{total}: {gift}")
-                logger.info(f"      Все атрибуты: {dir(gift)}")
-                
-                is_upgradable = False
-                if hasattr(gift, 'can_upgrade') and gift.can_upgrade:
-                    is_upgradable = True
-                    logger.info(f"      ✅ can_upgrade = True")
-                elif hasattr(gift, 'upgradable') and gift.upgradable:
-                    is_upgradable = True
-                    logger.info(f"      ✅ upgradable = True")
-                elif hasattr(gift, 'is_upgradable') and gift.is_upgradable:
-                    is_upgradable = True
-                    logger.info(f"      ✅ is_upgradable = True")
+                if hasattr(gift_obj, 'gift') and hasattr(gift_obj.gift, 'can_upgrade'):
+                    if gift_obj.gift.can_upgrade:
+                        count += 1
+                        logger.info(f"   ✅ Неулучшенный подарок #{total}")
+                    else:
+                        logger.info(f"   ❌ Уже улучшенный подарок #{total}")
                 else:
-                    logger.info(f"      ❌ Нет поля can_upgrade/upgradable/is_upgradable")
-                
-                if is_upgradable:
-                    count += 1
+                    logger.info(f"   ⚠️ Неизвестная структура подарка #{total}")
         
         logger.info(f"📊 {username}: всего {total} подарков, из них неулучшенных: {count}")
         
