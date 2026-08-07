@@ -25,7 +25,7 @@ SESSION_STRING = os.getenv("SESSION_STRING", "")
 PORT = int(os.getenv("PORT", 8080))
 
 # --- НАСТРОЙКИ ---
-MAX_USERS = 10  # ← ТЕПЕРЬ 10
+MAX_USERS = 10
 
 if not API_ID or not API_HASH:
     logger.error("❌ API_ID и API_HASH не установлены!")
@@ -75,22 +75,33 @@ def index():
 def health():
     return jsonify({"status": "alive", "client_ready": client_ready}), 200
 
-# --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ, БОТ ЛИ ЭТО (БЕЗ is_bot) ---
+# --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ, БОТ ЛИ ЭТО (С ВАЛИДАЦИЕЙ ПО СЛОВУ Bot) ---
 def is_bot_user(user):
     """
     Проверяет, является ли пользователь ботом.
-    У ботов обычно нет first_name, а есть username.
+    Проверяем по:
+    1. Наличию first_name (если нет — бот)
+    2. Слову 'bot' в first_name или username (регистронезависимо)
     """
     try:
-        # Если есть first_name — это человек
-        if hasattr(user, 'first_name') and user.first_name:
-            return False
-        # Если нет first_name, но есть username — скорее всего бот
+        # Проверяем юзернейм
         if hasattr(user, 'username') and user.username:
+            if 'bot' in user.username.lower():
+                return True
+        
+        # Проверяем имя
+        if hasattr(user, 'first_name') and user.first_name:
+            if 'bot' in user.first_name.lower():
+                return True
+        
+        # Если нет first_name — скорее всего бот
+        if not hasattr(user, 'first_name') or not user.first_name:
             return True
+        
+        return False
+        
     except:
-        pass
-    return False
+        return False
 
 # --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ ---
 async def get_users_from_group(entity):
