@@ -77,7 +77,7 @@ def health():
     return jsonify({"status": "alive", "client_ready": client_ready}), 200
 
 # --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ ---
-async def get_participants_safe(entity, offset=0, limit=200, retry_count=0):
+async def get_participants_safe(entity, offset="", limit=200, retry_count=0):
     """Безопасно получает участников с защитой от флуда"""
     global client
     
@@ -178,7 +178,7 @@ async def handler(event):
             await event.reply("👥 Получаю список участников...")
             
             all_users = []
-            offset = 0
+            offset = ""
             limit = 200
             total_loaded = 0
             
