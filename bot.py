@@ -29,7 +29,7 @@ MIN_DELAY = 3.0          # Минимальная задержка между п
 MAX_DELAY = 6.0          # Максимальная задержка между проверками (сек)
 BATCH_SIZE = 20          # После скольких пользователей делать паузу
 BATCH_PAUSE = 45         # Длительность паузы (сек)
-MAX_USERS_TO_CHECK = 500 # Максимум пользователей для проверки (защита от перегрузки)
+MAX_USERS_TO_CHECK = 500 # Максимум пользователей для проверки
 
 if not API_ID or not API_HASH:
     logger.error("❌ API_ID и API_HASH не установлены!")
@@ -94,60 +94,40 @@ def is_bot_user(user):
     except:
         return False
 
-# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ДЕЛЕЯ (ЗАЩИТА ОТ ФЛУДА) ---
+# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ДЕЛЕЯ ---
 def get_delay():
     return random.uniform(MIN_DELAY, MAX_DELAY)
 
-# --- ФУНКЦИЯ: ПОЛУЧЕНИЕ УЧАСТНИКОВ ЧАТА ---
+# --- ФУНКЦИЯ: ПОЛУЧЕНИЕ УЧАСТНИКОВ ЧАТА (ИСПРАВЛЕННАЯ) ---
 async def get_chat_participants(entity):
-    """Получает участников чата (без ограничений)"""
+    """Получает участников чата через iter_participants (без offset)"""
     global client
     
     users = []
-    offset = 0
-    limit = 200
     
     logger.info(f"🔍 Начинаю сбор участников чата...")
     
     try:
-        while True:
-            try:
-                chunk = await client.get_participants(
-                    entity,
-                    offset=offset,
-                    limit=limit
-                )
-                
-                if not chunk:
-                    break
-                
-                for user in chunk:
-                    if user.username and not is_bot_user(user):
-                        users.append(user)
-                
-                offset += limit
-                logger.info(f"   Собрано {len(users)} пользователей...")
-                
-                # Пауза между порциями
-                await asyncio.sleep(1)
-                
-            except FloodWaitError as e:
-                wait = e.seconds
-                logger.warning(f"⏳ FloodWait при сборе: {wait} сек")
-                await asyncio.sleep(wait + 1)
-                continue
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка при сборе участников: {e}")
-                break
+        async for user in client.iter_participants(entity):
+            if user.username and not is_bot_user(user):
+                users.append(user)
+                # Показываем прогресс каждые 100 пользователей
+                if len(users) % 100 == 0:
+                    logger.info(f"   Собрано {len(users)} пользователей...")
         
         logger.info(f"✅ Всего собрано {len(users)} пользователей")
         return users
         
+    except FloodWaitError as e:
+        wait = e.seconds
+        logger.warning(f"⏳ FloodWait при сборе: {wait} сек")
+        await asyncio.sleep(wait + 1)
+        return await get_chat_participants(entity)
     except Exception as e:
         logger.error(f"❌ Ошибка сбора участников: {e}")
         return []
 
-# --- ФУНКЦИЯ: ПРОВЕРКА ПОДАРКОВ У ОДНОГО ПОЛЬЗОВАТЕЛЯ ---
+# --- ФУНКЦИЯ: ПРОВЕРКА ПОДАРКОВ ---
 async def check_user_gifts(username):
     """Проверяет неулучшенные подарки у пользователя"""
     global client
@@ -198,7 +178,7 @@ async def check_user_gifts(username):
         logger.error(f"❌ Ошибка проверки {username}: {e}")
         return None, str(e)
 
-# --- ФУНКЦИЯ: МАССОВАЯ ПРОВЕРКА С ЗАЩИТОЙ ---
+# --- ФУНКЦИЯ: МАССОВАЯ ПРОВЕРКА ---
 async def check_users_batch(users, chat_id, user_id):
     """Проверяет список пользователей с защитой от флуда"""
     global scanning_users
@@ -208,7 +188,6 @@ async def check_users_batch(users, chat_id, user_id):
     checked = 0
     found_gifts = 0
     
-    # Если пользователей больше MAX_USERS_TO_CHECK, берем случайных
     if total_users > MAX_USERS_TO_CHECK:
         random.shuffle(users)
         users = users[:MAX_USERS_TO_CHECK]
@@ -224,21 +203,18 @@ async def check_users_batch(users, chat_id, user_id):
     )
     
     for i, user in enumerate(users):
-        # Проверяем, не остановил ли пользователь
         if user_id in scanning_users and scanning_users[user_id].get("stopped"):
             await client.send_message(chat_id, "⏹️ Проверка остановлена.")
             return None
         
         username = f"@{user.username}"
         
-        # Показываем прогресс каждые 10 пользователей
         if i % 10 == 0 or i == len(users) - 1:
             await client.send_message(
                 chat_id,
                 f"⏳ Прогресс: {i+1}/{len(users)} - проверяю..."
             )
         
-        # Проверяем подарки
         count, error = await check_user_gifts(username)
         
         if error:
@@ -250,10 +226,8 @@ async def check_users_batch(users, chat_id, user_id):
                 results.append((username, count))
                 logger.info(f"🎁 Найден: {username} - {count} подарков")
         
-        # Задержка между проверками
         await asyncio.sleep(get_delay())
         
-        # Пауза после батча
         if (i + 1) % BATCH_SIZE == 0 and i < len(users) - 1:
             await client.send_message(
                 chat_id,
@@ -269,7 +243,6 @@ async def scan_chat(chat_link, chat_id, user_id):
     global scanning_users
     
     try:
-        # --- 1. ПОЛУЧАЕМ ЧАТ ---
         if 't.me/' in chat_link:
             chat_username = chat_link.split('t.me/')[-1].strip('/')
         else:
@@ -293,7 +266,6 @@ async def scan_chat(chat_link, chat_id, user_id):
         except:
             await client.send_message(chat_id, f"✅ Чат найден (ID: {entity.id})")
         
-        # --- 2. ПОЛУЧАЕМ УЧАСТНИКОВ ---
         await client.send_message(chat_id, "👥 Получаю список участников...")
         
         users = await get_chat_participants(entity)
@@ -308,13 +280,11 @@ async def scan_chat(chat_link, chat_id, user_id):
             f"✅ Найдено {len(users)} пользователей с юзернеймами"
         )
         
-        # --- 3. ПРОВЕРЯЕМ ПОДАРКИ ---
         results, checked, found_gifts = await check_users_batch(users, chat_id, user_id)
         
         if results is None:
             return
         
-        # --- 4. ФОРМИРУЕМ ОТЧЕТ ---
         lines = []
         lines.append("✅ **СКАНИРОВАНИЕ ЗАВЕРШЕНО!**")
         lines.append("━━━━━━━━━━━━━━━━━")
@@ -328,7 +298,6 @@ async def scan_chat(chat_link, chat_id, user_id):
             lines.append("**Пользователи с неулучшенными подарками:**")
             lines.append("")
             
-            # Сортируем по количеству подарков
             results.sort(key=lambda x: x[1], reverse=True)
             
             for username, count in results:
@@ -368,7 +337,6 @@ async def handler(event):
         
         logger.info(f"📩 Сообщение от {user_id}: {text[:50]}...")
         
-        # --- КОМАНДА /help ---
         if text.lower() in ['/help', 'помощь']:
             await client.send_message(
                 chat_id,
@@ -383,7 +351,6 @@ async def handler(event):
             )
             return
         
-        # --- КОМАНДА /stop ---
         if text.lower() in ['/stop', 'стоп']:
             if user_id in scanning_users:
                 scanning_users[user_id]["stopped"] = True
@@ -392,10 +359,8 @@ async def handler(event):
                 await client.send_message(chat_id, "ℹ️ Нет активной проверки.")
             return
         
-        # --- ПАРСИМ ССЫЛКУ И ЗАПУСКАЕМ СКАНИРОВАНИЕ ---
         chat_input = text.strip()
         
-        # Проверяем, похоже ли на ссылку
         if 't.me/' not in chat_input and not chat_input.startswith('@'):
             await client.send_message(
                 chat_id,
@@ -410,7 +375,6 @@ async def handler(event):
             await client.send_message(chat_id, "⏳ Уже идет сканирование. Дождись завершения.")
             return
         
-        # Запускаем сканирование
         scanning_users[user_id] = {"status": "active", "stopped": False}
         asyncio.create_task(scan_chat(chat_input, chat_id, user_id))
         
