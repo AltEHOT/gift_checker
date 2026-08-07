@@ -6,7 +6,6 @@ import logging
 import asyncio
 import base64
 import traceback
-import re
 from flask import Flask, jsonify
 from telethon import TelegramClient, events, functions
 from telethon.errors import FloodWaitError, RPCError
@@ -24,6 +23,13 @@ API_ID = int(os.getenv("API_ID", 0))
 API_HASH = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
 PORT = int(os.getenv("PORT", 8080))
+
+# --- НАСТРОЙКИ ЗАЩИТЫ ОТ ФЛУДА ---
+MIN_DELAY = 3.0          # Минимальная задержка между проверками (сек)
+MAX_DELAY = 6.0          # Максимальная задержка между проверками (сек)
+BATCH_SIZE = 20          # После скольких пользователей делать паузу
+BATCH_PAUSE = 45         # Длительность паузы (сек)
+MAX_USERS_TO_CHECK = 500 # Максимум пользователей для проверки (защита от перегрузки)
 
 if not API_ID or not API_HASH:
     logger.error("❌ API_ID и API_HASH не установлены!")
@@ -56,9 +62,8 @@ else:
 app = Flask(__name__)
 
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
-user_data = {}
-request_timestamps = []
 client_ready = False
+scanning_users = {}
 
 # --- ЭНДПОИНТЫ ---
 @app.route('/', methods=['GET'])
@@ -67,23 +72,85 @@ def index():
         "status": "running",
         "service": "Gift Checker",
         "client_ready": client_ready,
-        "active_checks": len([u for u in user_data.values() if u.get("status") == "active"])
+        "active_scans": len(scanning_users)
     })
 
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({"status": "alive", "client_ready": client_ready}), 200
 
-# --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ, ЧТО ЭТО ЮЗЕРНЕЙМ ---
-def is_valid_username(text):
-    if not text or not isinstance(text, str):
+# --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ, БОТ ЛИ ЭТО ---
+def is_bot_user(user):
+    try:
+        if hasattr(user, 'username') and user.username:
+            if 'bot' in user.username.lower():
+                return True
+        if hasattr(user, 'first_name') and user.first_name:
+            if 'bot' in user.first_name.lower():
+                return True
+        if not hasattr(user, 'first_name') or not user.first_name:
+            return True
         return False
-    text = text.strip()
-    return re.match(r'^@[A-Za-z0-9_]{3,}$', text) is not None
+    except:
+        return False
 
-# --- ПРОВЕРКА ПОДАРКОВ (ИСПРАВЛЕННАЯ) ---
-async def check_gifts(username):
-    global client, request_timestamps
+# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ДЕЛЕЯ (ЗАЩИТА ОТ ФЛУДА) ---
+def get_delay():
+    return random.uniform(MIN_DELAY, MAX_DELAY)
+
+# --- ФУНКЦИЯ: ПОЛУЧЕНИЕ УЧАСТНИКОВ ЧАТА ---
+async def get_chat_participants(entity):
+    """Получает участников чата (без ограничений)"""
+    global client
+    
+    users = []
+    offset = 0
+    limit = 200
+    
+    logger.info(f"🔍 Начинаю сбор участников чата...")
+    
+    try:
+        while True:
+            try:
+                chunk = await client.get_participants(
+                    entity,
+                    offset=offset,
+                    limit=limit
+                )
+                
+                if not chunk:
+                    break
+                
+                for user in chunk:
+                    if user.username and not is_bot_user(user):
+                        users.append(user)
+                
+                offset += limit
+                logger.info(f"   Собрано {len(users)} пользователей...")
+                
+                # Пауза между порциями
+                await asyncio.sleep(1)
+                
+            except FloodWaitError as e:
+                wait = e.seconds
+                logger.warning(f"⏳ FloodWait при сборе: {wait} сек")
+                await asyncio.sleep(wait + 1)
+                continue
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка при сборе участников: {e}")
+                break
+        
+        logger.info(f"✅ Всего собрано {len(users)} пользователей")
+        return users
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка сбора участников: {e}")
+        return []
+
+# --- ФУНКЦИЯ: ПРОВЕРКА ПОДАРКОВ У ОДНОГО ПОЛЬЗОВАТЕЛЯ ---
+async def check_user_gifts(username):
+    """Проверяет неулучшенные подарки у пользователя"""
+    global client
     
     try:
         username = str(username).strip()
@@ -93,12 +160,9 @@ async def check_gifts(username):
         if not username or username.isdigit():
             return None, "Невалидный username"
         
-        logger.info(f"🔍 Проверяю: {username}")
-        
         try:
             input_peer = await client.get_input_entity(username)
         except Exception as e:
-            logger.error(f"❌ Ошибка получения {username}: {e}")
             return None, f"Не найден"
         
         try:
@@ -115,234 +179,249 @@ async def check_gifts(username):
             wait = e.seconds
             logger.warning(f"⏳ FloodWait {wait} сек для {username}")
             await asyncio.sleep(wait + 1)
-            return await check_gifts(username)
+            return await check_user_gifts(username)
         except Exception as e:
-            logger.error(f"❌ Ошибка GetSavedStarGifts для {username}: {e}")
-            return None, f"Ошибка API: {str(e)[:50]}"
+            return None, f"Ошибка API"
         
-        # --- ПОДСЧЕТ: upgrade_variants ИЛИ prepaid_upgrade_hash ---
+        # Считаем неулучшенные подарки
         count = 0
-        total = 0
         if result and result.gifts:
             for gift_obj in result.gifts:
-                total += 1
-                
-                can_upgrade = False
-                
-                # Если есть upgrade_variants (число > 0)
                 if hasattr(gift_obj, 'upgrade_variants') and gift_obj.upgrade_variants:
-                    can_upgrade = True
-                    logger.info(f"   ✅ Неулучшенный #{total} (upgrade_variants={gift_obj.upgrade_variants})")
-                # Если есть prepaid_upgrade_hash (строка)
+                    count += 1
                 elif hasattr(gift_obj, 'prepaid_upgrade_hash') and gift_obj.prepaid_upgrade_hash:
-                    can_upgrade = True
-                    logger.info(f"   ✅ Неулучшенный #{total} (есть prepaid_upgrade_hash)")
-                else:
-                    logger.info(f"   ❌ Уже улучшенный #{total}")
-                
-                if can_upgrade:
                     count += 1
         
-        logger.info(f"📊 {username}: всего {total} подарков, из них неулучшенных: {count}")
-        
-        request_timestamps.append(time.time())
         return count, None
         
     except Exception as e:
         logger.error(f"❌ Ошибка проверки {username}: {e}")
-        logger.error(traceback.format_exc())
-        return None, str(e)[:50]
+        return None, str(e)
 
-# --- ФУНКЦИЯ ДЛЯ ФОРМИРОВАНИЯ ОТЧЕТА ---
-def format_report(results, total_time, total_gifts):
-    lines = []
-    lines.append("✅ **ПРОВЕРКА ЗАВЕРШЕНА!**")
-    lines.append("━━━━━━━━━━━━━━━━━")
+# --- ФУНКЦИЯ: МАССОВАЯ ПРОВЕРКА С ЗАЩИТОЙ ---
+async def check_users_batch(users, chat_id, user_id):
+    """Проверяет список пользователей с защитой от флуда"""
+    global scanning_users
     
-    sorted_results = sorted(results, key=lambda x: x[1] if x[1] is not None else -1, reverse=True)
+    total_users = len(users)
+    results = []
+    checked = 0
+    found_gifts = 0
     
-    for username, count, error in sorted_results:
+    # Если пользователей больше MAX_USERS_TO_CHECK, берем случайных
+    if total_users > MAX_USERS_TO_CHECK:
+        random.shuffle(users)
+        users = users[:MAX_USERS_TO_CHECK]
+        await client.send_message(
+            chat_id,
+            f"⚠️ В чате {total_users} пользователей. Проверю {MAX_USERS_TO_CHECK} случайных."
+        )
+    
+    await client.send_message(
+        chat_id,
+        f"🔍 Начинаю проверку {len(users)} пользователей...\n"
+        f"⏱ Примерное время: ~{len(users) * 4} сек"
+    )
+    
+    for i, user in enumerate(users):
+        # Проверяем, не остановил ли пользователь
+        if user_id in scanning_users and scanning_users[user_id].get("stopped"):
+            await client.send_message(chat_id, "⏹️ Проверка остановлена.")
+            return None
+        
+        username = f"@{user.username}"
+        
+        # Показываем прогресс каждые 10 пользователей
+        if i % 10 == 0 or i == len(users) - 1:
+            await client.send_message(
+                chat_id,
+                f"⏳ Прогресс: {i+1}/{len(users)} - проверяю..."
+            )
+        
+        # Проверяем подарки
+        count, error = await check_user_gifts(username)
+        
         if error:
-            lines.append(f"❌ {username}: {error}")
-        elif count is None:
-            lines.append(f"❌ {username}: ошибка")
-        elif count > 0:
-            lines.append(f"✅ {username}: **{count}** 🎁")
+            logger.warning(f"❌ {username}: {error}")
         else:
-            lines.append(f"ℹ️ {username}: 0")
+            checked += 1
+            if count and count > 0:
+                found_gifts += count
+                results.append((username, count))
+                logger.info(f"🎁 Найден: {username} - {count} подарков")
+        
+        # Задержка между проверками
+        await asyncio.sleep(get_delay())
+        
+        # Пауза после батча
+        if (i + 1) % BATCH_SIZE == 0 and i < len(users) - 1:
+            await client.send_message(
+                chat_id,
+                f"⏸️ Пауза {BATCH_PAUSE} сек (обработано {i+1}/{len(users)})"
+            )
+            await asyncio.sleep(BATCH_PAUSE)
     
-    lines.append("━━━━━━━━━━━━━━━━━")
-    lines.append(f"📊 Всего проверено: **{len(results)}** аккаунтов")
-    lines.append(f"⏱ Время: **{total_time}** сек")
-    lines.append(f"🎁 Найдено подарков: **{total_gifts}**")
+    return results, checked, found_gifts
+
+# --- ОСНОВНАЯ ФУНКЦИЯ СКАНИРОВАНИЯ ---
+async def scan_chat(chat_link, chat_id, user_id):
+    """Основная функция: парсинг чата + проверка подарков"""
+    global scanning_users
     
-    return "\n".join(lines)
+    try:
+        # --- 1. ПОЛУЧАЕМ ЧАТ ---
+        if 't.me/' in chat_link:
+            chat_username = chat_link.split('t.me/')[-1].strip('/')
+        else:
+            chat_username = chat_link.strip('/')
+        
+        if chat_username.startswith('@'):
+            chat_username = chat_username[1:]
+        
+        await client.send_message(chat_id, f"🔍 Ищу чат: @{chat_username}...")
+        
+        try:
+            entity = await client.get_entity(chat_username)
+        except Exception as e:
+            await client.send_message(chat_id, f"❌ Не могу найти чат: {e}")
+            scanning_users.pop(user_id, None)
+            return
+        
+        try:
+            chat_name = entity.title
+            await client.send_message(chat_id, f"✅ Найден чат: {chat_name}")
+        except:
+            await client.send_message(chat_id, f"✅ Чат найден (ID: {entity.id})")
+        
+        # --- 2. ПОЛУЧАЕМ УЧАСТНИКОВ ---
+        await client.send_message(chat_id, "👥 Получаю список участников...")
+        
+        users = await get_chat_participants(entity)
+        
+        if not users:
+            await client.send_message(chat_id, "❌ В чате нет пользователей с юзернеймами")
+            scanning_users.pop(user_id, None)
+            return
+        
+        await client.send_message(
+            chat_id,
+            f"✅ Найдено {len(users)} пользователей с юзернеймами"
+        )
+        
+        # --- 3. ПРОВЕРЯЕМ ПОДАРКИ ---
+        results, checked, found_gifts = await check_users_batch(users, chat_id, user_id)
+        
+        if results is None:
+            return
+        
+        # --- 4. ФОРМИРУЕМ ОТЧЕТ ---
+        lines = []
+        lines.append("✅ **СКАНИРОВАНИЕ ЗАВЕРШЕНО!**")
+        lines.append("━━━━━━━━━━━━━━━━━")
+        lines.append(f"📊 Проверено пользователей: **{checked}**")
+        lines.append(f"🎁 Найдено неулучшенных подарков: **{found_gifts}**")
+        lines.append(f"👤 Найдено пользователей с подарками: **{len(results)}**")
+        lines.append("━━━━━━━━━━━━━━━━━")
+        
+        if results:
+            lines.append("")
+            lines.append("**Пользователи с неулучшенными подарками:**")
+            lines.append("")
+            
+            # Сортируем по количеству подарков
+            results.sort(key=lambda x: x[1], reverse=True)
+            
+            for username, count in results:
+                lines.append(f"✅ {username}: **{count}** 🎁")
+        else:
+            lines.append("")
+            lines.append("ℹ️ Не найдено пользователей с неулучшенными подарками")
+        
+        await client.send_message(chat_id, "\n".join(lines))
+        
+    except FloodWaitError as e:
+        wait = e.seconds
+        await client.send_message(chat_id, f"⏳ Telegram просит подождать {wait} секунд")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сканирования: {e}")
+        logger.error(traceback.format_exc())
+        await client.send_message(chat_id, f"❌ Ошибка: {str(e)[:200]}")
+    
+    finally:
+        scanning_users.pop(user_id, None)
 
 # --- ОБРАБОТЧИК СООБЩЕНИЙ ---
 @client.on(events.NewMessage)
 async def handler(event):
-    global user_data
+    global scanning_users
     
     try:
         if not event.is_private:
             return
         
         user_id = event.sender_id
+        chat_id = event.chat_id
         text = event.message.text
         
         if not text:
             return
         
-        logger.info(f"📩 Сообщение от {user_id}")
+        logger.info(f"📩 Сообщение от {user_id}: {text[:50]}...")
         
-        # --- КОМАНДЫ ---
-        if text.startswith('/'):
-            if text.lower() in ["/stop", "стоп"]:
-                if user_id in user_data:
-                    user_data[user_id]["status"] = "stopped"
-                    await event.reply("⏹️ Остановлено.")
-                return
-            
-            if text.lower() in ["/stats", "статистика"]:
-                if user_id in user_data and user_data[user_id].get("status") == "active":
-                    data = user_data[user_id]
-                    total = len(data["usernames"])
-                    current = data.get("index", 0)
-                    await event.reply(
-                        f"📊 Прогресс: {current}/{total}\n"
-                        f"🎁 Найдено: {data.get('total_gifts', 0)}"
-                    )
-                else:
-                    await event.reply("ℹ️ Нет активной проверки.")
-                return
-            
-            if text.lower() in ["/help", "помощь"]:
-                await event.reply(
-                    "🤖 **Помощь**\n\n"
-                    "Отправь список @username\n"
-                    "Например:\n"
-                    "@sirkapirkaw - 1\n"
-                    "@sofuuha - 2\n\n"
-                    "Команды:\n"
-                    "/stop - остановить\n"
-                    "/stats - прогресс"
-                )
-                return
-            return
-        
-        # --- ПАРСИНГ СПИСКА ---
-        if user_id in user_data and user_data[user_id].get("status") == "active":
-            data = user_data[user_id]
-            await event.reply(
-                f"⏳ Уже идет проверка: {data['index']}/{len(data['usernames'])}"
+        # --- КОМАНДА /help ---
+        if text.lower() in ['/help', 'помощь']:
+            await client.send_message(
+                chat_id,
+                "🤖 **Помощь**\n\n"
+                "Отправь ссылку на **ГРУППУ** или **КАНАЛ**:\n"
+                "`t.me/gift_chat`\n"
+                "`@gift_chat`\n\n"
+                "Бот соберет участников и проверит их подарки.\n\n"
+                "⚠️ Внимание: проверка может занять много времени для больших чатов!\n"
+                "Команды:\n"
+                "`/stop` - остановить проверку"
             )
             return
         
-        lines = text.strip().split('\n')
-        usernames = []
-        for line in lines:
-            if '@' in line:
-                for sep in [' - ', '—', ' -', '- ', '\t', ' ']:
-                    if sep in line:
-                        username = line.split(sep)[0].strip()
-                        break
-                else:
-                    username = line.strip()
-                
-                if is_valid_username(username):
-                    usernames.append(username)
-        
-        if not usernames:
-            await event.reply(
-                "❌ Не найдено @username\n\n"
-                "Отправь список:\n"
-                "@username1 - 1\n"
-                "@username2 - 2"
-            )
-            return
-        
-        if len(usernames) > 200:
-            await event.reply(
-                f"⚠️ Слишком много ({len(usernames)}). Максимум 200."
-            )
-            return
-        
-        # Сохраняем данные
-        user_data[user_id] = {
-            "usernames": usernames,
-            "index": 0,
-            "status": "active",
-            "start_time": time.time(),
-            "total_gifts": 0,
-            "results": []
-        }
-        
-        await event.reply(
-            f"✅ Получено {len(usernames)} аккаунтов.\n"
-            f"⏱ ~{len(usernames) * 3} сек\n"
-            f"Команда /stop для остановки"
-        )
-        
-        # --- ЗАПУСК ПРОВЕРКИ ---
-        data = user_data[user_id]
-        total = len(usernames)
-        results = []
-        
-        for index, username in enumerate(usernames):
-            if data.get("status") == "stopped":
-                await event.reply("⏹️ Остановлено.")
-                break
-            
-            data["index"] = index
-            
-            if index > 0 and index % 50 == 0:
-                await event.reply(f"⏸️ Пауза 30 сек ({index}/{total})")
-                await asyncio.sleep(30)
-            
-            if index % 10 == 0 or index == total - 1:
-                await event.reply(f"⏳ {index + 1}/{total} - проверяю...")
-            
-            count, error = await check_gifts(username)
-            
-            if error:
-                results.append((username, None, error))
+        # --- КОМАНДА /stop ---
+        if text.lower() in ['/stop', 'стоп']:
+            if user_id in scanning_users:
+                scanning_users[user_id]["stopped"] = True
+                await client.send_message(chat_id, "⏹️ Останавливаю проверку...")
             else:
-                if count and count > 0:
-                    data['total_gifts'] = data.get('total_gifts', 0) + count
-                results.append((username, count, None))
-            
-            await asyncio.sleep(random.uniform(2, 4))
+                await client.send_message(chat_id, "ℹ️ Нет активной проверки.")
+            return
         
-        # --- ОТПРАВЛЯЕМ ФИНАЛЬНЫЙ ОТЧЕТ ---
-        if data.get("status") != "stopped":
-            total_time = int(time.time() - data["start_time"])
-            report = format_report(results, total_time, data.get('total_gifts', 0))
-            
-            if len(report) > 4000:
-                parts = [report[i:i+4000] for i in range(0, len(report), 4000)]
-                for part in parts:
-                    await event.reply(part)
-            else:
-                await event.reply(report)
-        else:
-            await event.reply("⏹️ Проверка остановлена.")
+        # --- ПАРСИМ ССЫЛКУ И ЗАПУСКАЕМ СКАНИРОВАНИЕ ---
+        chat_input = text.strip()
         
-        data["status"] = "finished"
+        # Проверяем, похоже ли на ссылку
+        if 't.me/' not in chat_input and not chat_input.startswith('@'):
+            await client.send_message(
+                chat_id,
+                "❌ Это не похоже на ссылку.\n\n"
+                "Отправь ссылку в формате:\n"
+                "`t.me/gift_chat`\n"
+                "или `@gift_chat`"
+            )
+            return
         
-    except FloodWaitError as e:
-        wait = e.seconds
-        logger.warning(f"⏳ FloodWait: {wait} сек")
-        await asyncio.sleep(wait + 1)
-        await handler(event)
+        if user_id in scanning_users and scanning_users[user_id].get("status") == "active":
+            await client.send_message(chat_id, "⏳ Уже идет сканирование. Дождись завершения.")
+            return
+        
+        # Запускаем сканирование
+        scanning_users[user_id] = {"status": "active", "stopped": False}
+        asyncio.create_task(scan_chat(chat_input, chat_id, user_id))
+        
     except Exception as e:
         logger.error(f"❌ Ошибка в handler: {e}")
-        logger.error(traceback.format_exc())
         try:
-            await event.reply(f"❌ Ошибка: {str(e)[:100]}")
+            await client.send_message(event.chat_id, f"❌ Ошибка: {str(e)[:100]}")
         except:
             pass
 
-# --- ЗАПУСК ---
+# --- ЗАПУСК TELEGRAM ---
 def start_telethon():
     global client_ready
     
@@ -362,13 +441,15 @@ def start_telethon():
         
     except Exception as e:
         logger.error(f"❌ Ошибка Telethon: {e}")
-        logger.error(traceback.format_exc())
         client_ready = False
 
 # --- ГЛАВНЫЙ ЗАПУСК ---
 if __name__ == "__main__":
     logger.info("=" * 60)
-    logger.info("🚀 ЗАПУСК ЮЗЕРБОТА")
+    logger.info("🚀 ЗАПУСК ЮЗЕРБОТА ДЛЯ ПРОВЕРКИ ПОДАРКОВ")
+    logger.info("=" * 60)
+    logger.info("📌 Отправь ссылку на чат/канал")
+    logger.info("📌 Бот найдет участников и проверит их подарки")
     logger.info("=" * 60)
     
     import threading
