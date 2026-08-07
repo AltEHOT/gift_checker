@@ -76,7 +76,20 @@ def index():
 def health():
     return jsonify({"status": "alive", "client_ready": client_ready}), 200
 
-# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ (УНИВЕРСАЛЬНАЯ) ---
+# --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ, БОТ ЛИ ЭТО (УНИВЕРСАЛЬНАЯ) ---
+def is_bot_user(user):
+    """Универсальная проверка, является ли пользователь ботом"""
+    # Пробуем разные варианты
+    if hasattr(user, 'is_bot'):
+        return user.is_bot
+    if hasattr(user, 'bot'):
+        return user.bot is not None
+    if hasattr(user, 'bot_info'):
+        return user.bot_info is not None
+    # Если ничего не подходит — считаем, что не бот
+    return False
+
+# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ ---
 async def get_participants_safe(entity, retry_count=0):
     """Универсально получает участников без offset"""
     global client
@@ -87,8 +100,8 @@ async def get_participants_safe(entity, retry_count=0):
         
         users = []
         async for user in client.iter_participants(entity):
-            # Пропускаем ботов и пользователей без юзернейма
-            if not user.is_bot and user.username:
+            # Проверяем, что пользователь имеет юзернейм и не бот
+            if user.username and not is_bot_user(user):
                 users.append(user)
                 # Если набрали нужное количество — выходим
                 if len(users) >= MAX_USERS:
