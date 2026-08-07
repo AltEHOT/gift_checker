@@ -9,7 +9,7 @@ import traceback
 import re
 from flask import Flask, jsonify
 from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError, RPCError
+from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 
 # --- НАСТРОЙКА ЛОГОВ ---
@@ -86,9 +86,8 @@ def is_bot_user(user):
         return user.bot_info is not None
     return False
 
-# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ИМЕНИ ПОЛЬЗОВАТЕЛЯ ---
+# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ИМЕНИ (БЕЗОПАСНО) ---
 def get_user_name(user):
-    """Безопасно получает имя пользователя"""
     try:
         if hasattr(user, 'first_name'):
             name = user.first_name or ''
@@ -99,87 +98,72 @@ def get_user_name(user):
         pass
     return None
 
-# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ ---
-async def get_participants_safe(entity, retry_count=0):
+# --- ГЛАВНАЯ ФУНКЦИЯ ПОИСКА ПОЛЬЗОВАТЕЛЕЙ ---
+async def find_users_in_chat(entity):
+    """Ищет пользователей по сообщениям и комментариям"""
     global client
     
-    try:
-        await asyncio.sleep(random.uniform(1, 3))
-        
-        users = []
-        async for user in client.iter_participants(entity, aggressive=True):
-            # Проверяем, что это пользователь с юзернеймом
-            if not hasattr(user, 'username') or not user.username:
-                continue
-            
-            # Проверяем, что это не бот
-            if is_bot_user(user):
-                continue
-            
-            users.append(user)
-            if len(users) >= MAX_USERS:
-                break
-        
-        return users, None
-        
-    except FloodWaitError as e:
-        wait_time = e.seconds
-        logger.warning(f"⏳ FloodWait: {wait_time} сек")
-        await asyncio.sleep(wait_time + 1)
-        if retry_count < 3:
-            return await get_participants_safe(entity, retry_count + 1)
-        return None, f"FloodWait: {wait_time} сек"
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка iter_participants: {e}")
-        return None, str(e)
-
-# --- ФУНКЦИЯ ДЛЯ ПОИСКА ПО СООБЩЕНИЯМ ---
-async def get_users_from_messages(entity, retry_count=0):
-    global client
+    users = []
+    seen_ids = set()
     
     try:
-        await asyncio.sleep(random.uniform(1, 3))
-        
-        users = []
-        seen_ids = set()
-        
-        async for message in client.iter_messages(entity, limit=1000):
+        # 1. Ищем по сообщениям в чате
+        logger.info("🔍 Ищу пользователей по сообщениям...")
+        async for message in client.iter_messages(entity, limit=500):
             if not message.sender:
                 continue
             
             user = message.sender
             user_id = user.id
             
-            if user_id in seen_ids:
-                continue
-            
-            # Проверяем, что есть юзернейм
-            if not hasattr(user, 'username') or not user.username:
-                continue
-            
-            # Проверяем, что это не бот
+            # Пропускаем ботов и каналы
             if is_bot_user(user):
                 continue
             
-            seen_ids.add(user_id)
-            users.append(user)
-            if len(users) >= MAX_USERS:
-                break
+            # Пропускаем если нет юзернейма
+            if not hasattr(user, 'username') or not user.username:
+                continue
+            
+            if user_id not in seen_ids:
+                seen_ids.add(user_id)
+                users.append(user)
+                logger.info(f"   Найден: @{user.username}")
+                if len(users) >= MAX_USERS:
+                    return users
         
-        return users, None
+        # 2. Если не хватило, ищем по комментариям (для каналов)
+        if len(users) < MAX_USERS:
+            logger.info("🔍 Ищу пользователей по комментариям...")
+            async for message in client.iter_messages(entity, limit=500, reply_to=0):
+                if not message.sender:
+                    continue
+                
+                user = message.sender
+                user_id = user.id
+                
+                if is_bot_user(user):
+                    continue
+                
+                if not hasattr(user, 'username') or not user.username:
+                    continue
+                
+                if user_id not in seen_ids:
+                    seen_ids.add(user_id)
+                    users.append(user)
+                    logger.info(f"   Найден (комментарий): @{user.username}")
+                    if len(users) >= MAX_USERS:
+                        return users
+        
+        return users
         
     except FloodWaitError as e:
-        wait_time = e.seconds
-        logger.warning(f"⏳ FloodWait при получении сообщений: {wait_time} сек")
-        await asyncio.sleep(wait_time + 1)
-        if retry_count < 3:
-            return await get_users_from_messages(entity, retry_count + 1)
-        return None, f"FloodWait: {wait_time} сек"
-        
+        wait = e.seconds
+        logger.warning(f"⏳ FloodWait: {wait} сек")
+        await asyncio.sleep(wait + 1)
+        return await find_users_in_chat(entity)
     except Exception as e:
-        logger.error(f"❌ Ошибка iter_messages: {e}")
-        return None, str(e)
+        logger.error(f"❌ Ошибка поиска: {e}")
+        return users
 
 # --- ОБРАБОТЧИК СООБЩЕНИЙ ---
 @client.on(events.NewMessage)
@@ -205,7 +189,7 @@ async def handler(event):
                 "Отправь ссылку на чат или канал:\n"
                 "`t.me/gift_chat`\n"
                 "`@gift_chat`\n\n"
-                "Я найду 10 участников с юзернеймами."
+                "Я найду 10 пользователей с юзернеймами."
             )
             return
         
@@ -256,30 +240,20 @@ async def handler(event):
             except:
                 await event.reply(f"✅ Чат найден (ID: {entity.id})")
             
-            # --- 2. ПОЛУЧАЕМ УЧАСТНИКОВ ---
-            await event.reply("👥 Получаю список участников...")
+            # --- 2. ИЩЕМ ПОЛЬЗОВАТЕЛЕЙ ---
+            await event.reply("👥 Ищу пользователей по сообщениям...")
             await event.reply("⏳ Это может занять время...")
             
-            all_users, error = await get_participants_safe(entity)
-            
-            if error or not all_users:
-                logger.info("🔍 Участники не найдены, пробую через сообщения...")
-                await event.reply("🔄 Пробую найти пользователей через сообщения...")
-                all_users, error = await get_users_from_messages(entity)
-            
-            if error:
-                await event.reply(f"❌ Ошибка: {error}")
-                scanning_users.pop(user_id, None)
-                return
+            all_users = await find_users_in_chat(entity)
             
             # --- 3. ФОРМИРУЕМ ОТВЕТ ---
             if not all_users:
                 await event.reply(
                     "❌ В чате не найдено пользователей с юзернеймами.\n\n"
                     "Возможные причины:\n"
-                    "• Чат приватный или имеет ограничения\n"
-                    "• Все участники скрыли юзернеймы\n"
-                    "• В чате нет сообщений от пользователей с юзернеймами"
+                    "• В чате нет сообщений\n"
+                    "• Все пользователи без юзернеймов\n"
+                    "• Бот не может прочитать сообщения (нужны права)"
                 )
                 scanning_users.pop(user_id, None)
                 return
