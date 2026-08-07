@@ -60,7 +60,7 @@ app = Flask(__name__)
 
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 client_ready = False
-scanning_users = {}  # {user_id: {"status": "active", "chat": "..."}}
+scanning_users = {}
 
 # --- ЭНДПОИНТЫ ---
 @app.route('/', methods=['GET'])
@@ -76,33 +76,36 @@ def index():
 def health():
     return jsonify({"status": "alive", "client_ready": client_ready}), 200
 
-# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ (ИСПРАВЛЕННАЯ) ---
-async def get_participants_safe(entity, offset=0, limit=200, retry_count=0):
-    """Безопасно получает участников с защитой от флуда"""
+# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ (УНИВЕРСАЛЬНАЯ) ---
+async def get_participants_safe(entity, retry_count=0):
+    """Универсально получает участников без offset"""
     global client
     
     try:
-        # Случайная задержка (имитация человека)
+        # Случайная задержка
         await asyncio.sleep(random.uniform(1, 3))
         
-        # Используем get_participants с offset и limit
-        chunk = await client.get_participants(
-            entity,
-            offset=offset,
-            limit=limit
-        )
-        return chunk, None
+        users = []
+        async for user in client.iter_participants(entity):
+            # Пропускаем ботов и пользователей без юзернейма
+            if not user.is_bot and user.username:
+                users.append(user)
+                # Если набрали нужное количество — выходим
+                if len(users) >= MAX_USERS:
+                    break
+        
+        return users, None
         
     except FloodWaitError as e:
         wait_time = e.seconds
         logger.warning(f"⏳ FloodWait: {wait_time} сек")
         await asyncio.sleep(wait_time + 1)
         if retry_count < 3:
-            return await get_participants_safe(entity, offset, limit, retry_count + 1)
+            return await get_participants_safe(entity, retry_count + 1)
         return None, f"FloodWait: {wait_time} сек"
         
     except Exception as e:
-        logger.error(f"❌ Ошибка get_participants: {e}")
+        logger.error(f"❌ Ошибка iter_participants: {e}")
         return None, str(e)
 
 # --- ОБРАБОТЧИК СООБЩЕНИЙ ---
@@ -186,40 +189,14 @@ async def handler(event):
             
             # --- 2. ПОЛУЧАЕМ УЧАСТНИКОВ ---
             await event.reply("👥 Получаю список участников...")
+            await event.reply("⏳ Это может занять время...")
             
-            all_users = []
-            offset = 0
-            limit = 200
-            total_loaded = 0
+            all_users, error = await get_participants_safe(entity)
             
-            while len(all_users) < MAX_USERS:
-                chunk, error = await get_participants_safe(entity, offset, limit)
-                
-                if error:
-                    await event.reply(f"❌ Ошибка: {error}")
-                    break
-                
-                if not chunk:
-                    break
-                
-                # Фильтруем: только пользователи с юзернеймом, не боты
-                for user in chunk:
-                    if not user.is_bot and user.username:
-                        all_users.append(user)
-                        if len(all_users) >= MAX_USERS:
-                            break
-                
-                total_loaded += len(chunk)
-                offset += limit
-                
-                # Если загрузили много, но пользователей с юзернеймами мало
-                if total_loaded >= 500 and len(all_users) == 0:
-                    await event.reply("⚠️ В чате нет пользователей с юзернеймами")
-                    break
-                
-                # Показываем прогресс
-                if total_loaded % 200 == 0:
-                    await event.reply(f"⏳ Загружено {total_loaded} участников...")
+            if error:
+                await event.reply(f"❌ Ошибка: {error}")
+                scanning_users.pop(user_id, None)
+                return
             
             # --- 3. ФОРМИРУЕМ ОТВЕТ ---
             if not all_users:
