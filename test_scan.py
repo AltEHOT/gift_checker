@@ -20,15 +20,26 @@ if not API_ID or not API_HASH:
 
 # --- ПОДГОТОВКА СЕССИИ ---
 if SESSION_STRING and SESSION_STRING not in ["None", "NONE", "none", ""]:
-    print("🔑 Использую StringSession")
+    logger.info("🔑 Использую StringSession")
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+elif os.path.exists("session.b64"):
+    logger.info("📁 Декодирую session.b64...")
+    try:
+        with open("session.b64", "r") as f:
+            b64_data = f.read().strip()
+        with open("userbot_session.session", "wb") as f:
+            f.write(base64.b64decode(b64_data))
+        logger.info("✅ Сессия декодирована")
+        client = TelegramClient("userbot_session", API_ID, API_HASH)
+    except Exception as e:
+        logger.error(f"❌ Ошибка декодирования: {e}")
+        sys.exit(1)
 elif os.path.exists("userbot_session.session"):
-    print("📁 Использую файл сессии")
+    logger.info("📁 Использую файл сессии")
     client = TelegramClient("userbot_session", API_ID, API_HASH)
 else:
-    print("❌ Не найдена сессия!")
-    print("Сначала создай сессию через login.py")
-    exit(1)
+    logger.error("❌ Не найдена сессия!")
+    sys.exit(1)
 
 # --- ГЛАВНАЯ ФУНКЦИЯ ---
 async def main():
