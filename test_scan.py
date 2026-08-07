@@ -26,7 +26,7 @@ SESSION_STRING = os.getenv("SESSION_STRING", "")
 PORT = int(os.getenv("PORT", 8080))
 
 # --- НАСТРОЙКИ ---
-MAX_USERS = 10  # Сколько пользователей выводить
+MAX_USERS = 10
 
 if not API_ID or not API_HASH:
     logger.error("❌ API_ID и API_HASH не установлены!")
@@ -78,7 +78,6 @@ def health():
 
 # --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ, БОТ ЛИ ЭТО ---
 def is_bot_user(user):
-    """Универсальная проверка, является ли пользователь ботом"""
     if hasattr(user, 'is_bot'):
         return user.is_bot
     if hasattr(user, 'bot'):
@@ -87,31 +86,39 @@ def is_bot_user(user):
         return user.bot_info is not None
     return False
 
-# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ (С АГРЕССИВНЫМ РЕЖИМОМ) ---
+# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ИМЕНИ ПОЛЬЗОВАТЕЛЯ ---
+def get_user_name(user):
+    """Безопасно получает имя пользователя"""
+    try:
+        if hasattr(user, 'first_name'):
+            name = user.first_name or ''
+            if hasattr(user, 'last_name') and user.last_name:
+                name += f" {user.last_name}"
+            return name.strip()
+    except:
+        pass
+    return None
+
+# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ ---
 async def get_participants_safe(entity, retry_count=0):
-    """Получает участников с агрессивным режимом"""
     global client
     
     try:
         await asyncio.sleep(random.uniform(1, 3))
         
         users = []
-        
-        # Пробуем с агрессивным режимом
-        try:
-            async for user in client.iter_participants(entity, aggressive=True):
-                if user.username and not is_bot_user(user):
-                    users.append(user)
-                    if len(users) >= MAX_USERS:
-                        break
-        except Exception as e:
-            logger.warning(f"⚠️ Агрессивный режим не сработал: {e}")
-            # Пробуем без агрессивного режима
-            async for user in client.iter_participants(entity):
-                if user.username and not is_bot_user(user):
-                    users.append(user)
-                    if len(users) >= MAX_USERS:
-                        break
+        async for user in client.iter_participants(entity, aggressive=True):
+            # Проверяем, что это пользователь с юзернеймом
+            if not hasattr(user, 'username') or not user.username:
+                continue
+            
+            # Проверяем, что это не бот
+            if is_bot_user(user):
+                continue
+            
+            users.append(user)
+            if len(users) >= MAX_USERS:
+                break
         
         return users, None
         
@@ -127,9 +134,8 @@ async def get_participants_safe(entity, retry_count=0):
         logger.error(f"❌ Ошибка iter_participants: {e}")
         return None, str(e)
 
-# --- ФУНКЦИЯ ДЛЯ ПОИСКА ПО СООБЩЕНИЯМ (ЗАПАСНОЙ ВАРИАНТ) ---
+# --- ФУНКЦИЯ ДЛЯ ПОИСКА ПО СООБЩЕНИЯМ ---
 async def get_users_from_messages(entity, retry_count=0):
-    """Альтернативный способ: ищем пользователей по сообщениям"""
     global client
     
     try:
@@ -138,7 +144,6 @@ async def get_users_from_messages(entity, retry_count=0):
         users = []
         seen_ids = set()
         
-        # Получаем последние 1000 сообщений
         async for message in client.iter_messages(entity, limit=1000):
             if not message.sender:
                 continue
@@ -146,12 +151,21 @@ async def get_users_from_messages(entity, retry_count=0):
             user = message.sender
             user_id = user.id
             
-            # Проверяем, что это не бот и есть юзернейм
-            if user_id not in seen_ids and user.username and not is_bot_user(user):
-                seen_ids.add(user_id)
-                users.append(user)
-                if len(users) >= MAX_USERS:
-                    break
+            if user_id in seen_ids:
+                continue
+            
+            # Проверяем, что есть юзернейм
+            if not hasattr(user, 'username') or not user.username:
+                continue
+            
+            # Проверяем, что это не бот
+            if is_bot_user(user):
+                continue
+            
+            seen_ids.add(user_id)
+            users.append(user)
+            if len(users) >= MAX_USERS:
+                break
         
         return users, None
         
@@ -198,7 +212,6 @@ async def handler(event):
         # --- ПРОВЕРЯЕМ, НЕ ССЫЛКА ЛИ ЭТО ---
         chat_input = text.strip()
         
-        # Извлекаем username
         if 't.me/' in chat_input:
             chat_username = chat_input.split('t.me/')[-1].strip('/')
         else:
@@ -207,7 +220,6 @@ async def handler(event):
         if chat_username.startswith('@'):
             chat_username = chat_username[1:]
         
-        # Проверяем, похоже ли на username
         if ' ' in chat_username or len(chat_username) < 3:
             await event.reply(
                 "❌ Это не похоже на ссылку на чат.\n\n"
@@ -217,7 +229,6 @@ async def handler(event):
             )
             return
         
-        # Проверяем, не идет ли уже сканирование
         if user_id in scanning_users and scanning_users[user_id].get("status") == "active":
             await event.reply("⏳ Уже идет сканирование. Дождись завершения.")
             return
@@ -239,7 +250,6 @@ async def handler(event):
                 scanning_users.pop(user_id, None)
                 return
             
-            # Пытаемся получить название
             try:
                 chat_name = entity.title
                 await event.reply(f"✅ Найден чат: {chat_name}")
@@ -252,11 +262,9 @@ async def handler(event):
             
             all_users, error = await get_participants_safe(entity)
             
-            # --- ЕСЛИ УЧАСТНИКИ НЕ НАЙДЕНЫ, ПРОБУЕМ ЧЕРЕЗ СООБЩЕНИЯ ---
             if error or not all_users:
                 logger.info("🔍 Участники не найдены, пробую через сообщения...")
                 await event.reply("🔄 Пробую найти пользователей через сообщения...")
-                
                 all_users, error = await get_users_from_messages(entity)
             
             if error:
@@ -285,7 +293,7 @@ async def handler(event):
             
             for i, user in enumerate(all_users[:MAX_USERS], 1):
                 username = f"@{user.username}"
-                name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+                name = get_user_name(user)
                 
                 if name:
                     lines.append(f"{i:2}. {username} — {name}")
