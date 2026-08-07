@@ -76,15 +76,23 @@ def index():
 def health():
     return jsonify({"status": "alive", "client_ready": client_ready}), 200
 
-# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ ---
-async def get_participants_safe(entity, offset="", limit=200, retry_count=0):
+# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ (ИСПРАВЛЕННАЯ) ---
+async def get_participants_safe(entity, offset=0, limit=200, retry_count=0):
     """Безопасно получает участников с защитой от флуда"""
     global client
     
     try:
+        # Случайная задержка (имитация человека)
         await asyncio.sleep(random.uniform(1, 3))
-        chunk = await client.get_participants(entity, offset=offset, limit=limit)
+        
+        # Используем get_participants с offset и limit
+        chunk = await client.get_participants(
+            entity,
+            offset=offset,
+            limit=limit
+        )
         return chunk, None
+        
     except FloodWaitError as e:
         wait_time = e.seconds
         logger.warning(f"⏳ FloodWait: {wait_time} сек")
@@ -92,7 +100,9 @@ async def get_participants_safe(entity, offset="", limit=200, retry_count=0):
         if retry_count < 3:
             return await get_participants_safe(entity, offset, limit, retry_count + 1)
         return None, f"FloodWait: {wait_time} сек"
+        
     except Exception as e:
+        logger.error(f"❌ Ошибка get_participants: {e}")
         return None, str(e)
 
 # --- ОБРАБОТЧИК СООБЩЕНИЙ ---
@@ -135,7 +145,7 @@ async def handler(event):
         if chat_username.startswith('@'):
             chat_username = chat_username[1:]
         
-        # Проверяем, похоже ли на username (не содержит пробелов)
+        # Проверяем, похоже ли на username
         if ' ' in chat_username or len(chat_username) < 3:
             await event.reply(
                 "❌ Это не похоже на ссылку на чат.\n\n"
@@ -178,7 +188,7 @@ async def handler(event):
             await event.reply("👥 Получаю список участников...")
             
             all_users = []
-            offset = ""
+            offset = 0
             limit = 200
             total_loaded = 0
             
@@ -192,7 +202,7 @@ async def handler(event):
                 if not chunk:
                     break
                 
-                # Фильтруем
+                # Фильтруем: только пользователи с юзернеймом, не боты
                 for user in chunk:
                     if not user.is_bot and user.username:
                         all_users.append(user)
@@ -202,10 +212,14 @@ async def handler(event):
                 total_loaded += len(chunk)
                 offset += limit
                 
-                # Если загрузили много, но пользователей нет
+                # Если загрузили много, но пользователей с юзернеймами мало
                 if total_loaded >= 500 and len(all_users) == 0:
                     await event.reply("⚠️ В чате нет пользователей с юзернеймами")
                     break
+                
+                # Показываем прогресс
+                if total_loaded % 200 == 0:
+                    await event.reply(f"⏳ Загружено {total_loaded} участников...")
             
             # --- 3. ФОРМИРУЕМ ОТВЕТ ---
             if not all_users:
