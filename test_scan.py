@@ -75,7 +75,7 @@ def index():
 def health():
     return jsonify({"status": "alive", "client_ready": client_ready}), 200
 
-# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ (ПРОСТАЯ) ---
+# --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ ---
 async def get_users_from_group(entity):
     """Просто получает участников группы"""
     global client
@@ -84,9 +84,6 @@ async def get_users_from_group(entity):
     
     try:
         async for user in client.iter_participants(entity):
-            # Пропускаем ботов
-            if user.is_bot:
-                continue
             # Пропускаем если нет юзернейма
             if not user.username:
                 continue
@@ -171,12 +168,11 @@ async def handler(event):
                 return
             
             # Проверяем, что это группа
-            if hasattr(entity, 'megagroup') or hasattr(entity, 'group'):
-                await event.reply(f"✅ Найдена группа: {entity.title}")
-            else:
-                await event.reply("❌ Это не группа (возможно канал). Для каналов список участников скрыт.")
-                scanning_users.pop(user_id, None)
-                return
+            try:
+                chat_title = entity.title
+                await event.reply(f"✅ Найдена группа: {chat_title}")
+            except:
+                await event.reply(f"✅ Группа найдена (ID: {entity.id})")
             
             # Получаем участников
             await event.reply("👥 Получаю список участников...")
