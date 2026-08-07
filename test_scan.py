@@ -25,7 +25,7 @@ SESSION_STRING = os.getenv("SESSION_STRING", "")
 PORT = int(os.getenv("PORT", 8080))
 
 # --- НАСТРОЙКИ ---
-MAX_USERS = 10
+MAX_USERS = 10  # ← ТЕПЕРЬ 10
 
 if not API_ID or not API_HASH:
     logger.error("❌ API_ID и API_HASH не установлены!")
@@ -75,9 +75,26 @@ def index():
 def health():
     return jsonify({"status": "alive", "client_ready": client_ready}), 200
 
+# --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ, БОТ ЛИ ЭТО (БЕЗ is_bot) ---
+def is_bot_user(user):
+    """
+    Проверяет, является ли пользователь ботом.
+    У ботов обычно нет first_name, а есть username.
+    """
+    try:
+        # Если есть first_name — это человек
+        if hasattr(user, 'first_name') and user.first_name:
+            return False
+        # Если нет first_name, но есть username — скорее всего бот
+        if hasattr(user, 'username') and user.username:
+            return True
+    except:
+        pass
+    return False
+
 # --- ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ УЧАСТНИКОВ ---
 async def get_users_from_group(entity):
-    """Просто получает участников группы"""
+    """Получает участников группы (только людей, без ботов)"""
     global client
     
     users = []
@@ -87,6 +104,11 @@ async def get_users_from_group(entity):
             # Пропускаем если нет юзернейма
             if not user.username:
                 continue
+            
+            # Пропускаем ботов
+            if is_bot_user(user):
+                continue
+            
             users.append(user)
             if len(users) >= MAX_USERS:
                 break
