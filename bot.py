@@ -24,16 +24,17 @@ API_HASH = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
 PORT = int(os.getenv("PORT", 8080))
 
-# --- НАСТРОЙКИ ЗАЩИТЫ ОТ ФЛУДА ---
-MIN_DELAY = 3.0          # Минимальная задержка между проверками (сек)
-MAX_DELAY = 6.0          # Максимальная задержка между проверками (сек)
-BATCH_SIZE = 20          # После скольких пользователей делать паузу
-BATCH_PAUSE = 45         # Длительность паузы (сек)
-MAX_USERS_TO_CHECK = 500 # Максимум пользователей для проверки
-MAX_DAILY_CHECKS = 3     # Максимум проверок в день на пользователя
+# --- НАСТРОЙКИ ЗАЩИТЫ ОТ ФЛУДА (ОБНОВЛЕНЫ) ---
+MIN_DELAY = 5.0          # Минимальная задержка между проверками (сек) ↑
+MAX_DELAY = 8.0          # Максимальная задержка между проверками (сек) ↑
+BATCH_SIZE = 15          # После скольких пользователей делать паузу ↓
+BATCH_PAUSE = 60         # Длительность паузы (сек) ↑
+MAX_USERS_TO_CHECK = 1000 # Максимум пользователей для проверки ↑
+MAX_DAILY_CHECKS = 2     # Максимум проверок в день на пользователя
+MESSAGES_LIMIT = 1000    # Количество сообщений для поиска пользователей ↑
 
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
-daily_checks = {}  # {user_id: {"date": "2024-01-01", "count": 0}}
+daily_checks = {}
 
 if not API_ID or not API_HASH:
     logger.error("❌ API_ID и API_HASH не установлены!")
@@ -159,10 +160,13 @@ async def get_users_from_messages(entity):
     
     users = []
     seen_ids = set()
-    logger.info("🔍 Ищу пользователей по сообщениям...")
+    
+    logger.info("🔍 Ищу пользователей по сообщениям и комментариям...")
     
     try:
-        async for message in client.iter_messages(entity, limit=500):
+        # --- 1. ИЩЕМ ПО СООБЩЕНИЯМ В ЧАТЕ ---
+        logger.info("   📝 Поиск по сообщениям в чате...")
+        async for message in client.iter_messages(entity, limit=MESSAGES_LIMIT):
             if not message.sender:
                 continue
             
@@ -181,7 +185,34 @@ async def get_users_from_messages(entity):
             if len(users) >= MAX_USERS_TO_CHECK:
                 break
         
-        logger.info(f"✅ Найдено {len(users)} пользователей по сообщениям")
+        logger.info(f"   Найдено {len(users)} пользователей по сообщениям")
+        
+        # --- 2. ИЩЕМ ПО КОММЕНТАРИЯМ (для каналов) ---
+        if len(users) < MAX_USERS_TO_CHECK and len(users) < 100:
+            logger.info("   💬 Поиск по комментариям к постам...")
+            try:
+                async for message in client.iter_messages(entity, limit=500, reply_to=0):
+                    if not message.sender:
+                        continue
+                    
+                    user = message.sender
+                    user_id = user.id
+                    
+                    if user_id in seen_ids:
+                        continue
+                    if not user.username:
+                        continue
+                    if is_bot_user(user):
+                        continue
+                    
+                    seen_ids.add(user_id)
+                    users.append(user)
+                    if len(users) >= MAX_USERS_TO_CHECK:
+                        break
+            except Exception as e:
+                logger.warning(f"   ⚠️ Поиск по комментариям не сработал: {e}")
+        
+        logger.info(f"✅ Всего найдено {len(users)} пользователей")
         return users
         
     except FloodWaitError as e:
@@ -196,10 +227,21 @@ async def get_users_from_messages(entity):
 # --- ФУНКЦИЯ: ПОЛУЧЕНИЕ ПОЛЬЗОВАТЕЛЕЙ (С ЗАПАСНЫМ ВАРИАНТОМ) ---
 async def get_users_safe(entity):
     users = await get_chat_participants(entity)
-    if users:
+    if users and len(users) >= 50:
+        logger.info(f"✅ Найдено {len(users)} пользователей через участников")
         return users
-    logger.info("🔄 Участники не найдены, пробую через сообщения...")
-    return await get_users_from_messages(entity)
+    
+    logger.info("🔄 Мало участников, пробую через сообщения...")
+    users = await get_users_from_messages(entity)
+    if users and len(users) >= 10:
+        logger.info(f"✅ Найдено {len(users)} пользователей через сообщения")
+        return users
+    
+    if users and len(users) > 0:
+        return users
+    
+    logger.warning("⚠️ Не удалось найти пользователей")
+    return []
 
 # --- ФУНКЦИЯ: ПРОВЕРКА ПОДАРКОВ ---
 async def check_user_gifts(username):
@@ -270,7 +312,8 @@ async def check_users_batch(users, chat_id, user_id):
     await client.send_message(
         chat_id,
         f"🔍 Начинаю проверку {len(users)} пользователей...\n"
-        f"⏱ Примерное время: ~{len(users) * 4} сек"
+        f"⏱ Примерное время: ~{len(users) * 6} сек\n"
+        f"🛡️ Защита от флуда: ВКЛ (задержки {MIN_DELAY}-{MAX_DELAY} сек)"
     )
     
     for i, user in enumerate(users):
@@ -415,7 +458,8 @@ async def handler(event):
                 "`t.me/gift_chat`\n"
                 "`@gift_chat`\n\n"
                 f"📊 Лимит: {MAX_DAILY_CHECKS} проверки в день\n"
-                f"👥 Максимум: {MAX_USERS_TO_CHECK} пользователей за раз\n\n"
+                f"👥 Максимум пользователей: {MAX_USERS_TO_CHECK}\n"
+                f"🛡️ Защита от флуда: ВКЛ (задержки {MIN_DELAY}-{MAX_DELAY} сек)\n\n"
                 "Команды:\n"
                 "`/stop` - остановить проверку"
             )
@@ -441,7 +485,6 @@ async def handler(event):
             )
             return
         
-        # --- ПРОВЕРКА ДНЕВНОГО ЛИМИТА ---
         can_check, remaining = check_daily_limit(user_id)
         if not can_check:
             await client.send_message(
@@ -455,7 +498,6 @@ async def handler(event):
             await client.send_message(chat_id, "⏳ Уже идет сканирование. Дождись завершения.")
             return
         
-        # --- ЗАПУСКАЕМ СКАНИРОВАНИЕ ---
         increment_daily_check(user_id)
         await client.send_message(
             chat_id,
@@ -502,6 +544,9 @@ if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info(f"📊 Лимит проверок в день: {MAX_DAILY_CHECKS}")
     logger.info(f"👥 Максимум пользователей: {MAX_USERS_TO_CHECK}")
+    logger.info(f"📝 Сообщений для поиска: {MESSAGES_LIMIT}")
+    logger.info(f"🛡️ Задержки: {MIN_DELAY}-{MAX_DELAY} сек")
+    logger.info(f"📦 Пауза после {BATCH_SIZE} пользователей: {BATCH_PAUSE} сек")
     logger.info("=" * 60)
     
     import threading
