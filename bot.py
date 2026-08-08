@@ -30,6 +30,10 @@ MAX_DELAY = 6.0          # Максимальная задержка между 
 BATCH_SIZE = 20          # После скольких пользователей делать паузу
 BATCH_PAUSE = 45         # Длительность паузы (сек)
 MAX_USERS_TO_CHECK = 500 # Максимум пользователей для проверки
+MAX_DAILY_CHECKS = 3     # Максимум проверок в день на пользователя
+
+# --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
+daily_checks = {}  # {user_id: {"date": "2024-01-01", "count": 0}}
 
 if not API_ID or not API_HASH:
     logger.error("❌ API_ID и API_HASH не установлены!")
@@ -79,6 +83,31 @@ def index():
 def health():
     return jsonify({"status": "alive", "client_ready": client_ready}), 200
 
+@app.route('/stats', methods=['GET'])
+def stats():
+    return jsonify({
+        "daily_checks": daily_checks
+    })
+
+# --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ЛИМИТА ---
+def check_daily_limit(user_id):
+    today = time.strftime("%Y-%m-%d")
+    if user_id not in daily_checks:
+        daily_checks[user_id] = {"date": today, "count": 0}
+        return True, MAX_DAILY_CHECKS
+    if daily_checks[user_id]["date"] != today:
+        daily_checks[user_id] = {"date": today, "count": 0}
+        return True, MAX_DAILY_CHECKS
+    remaining = MAX_DAILY_CHECKS - daily_checks[user_id]["count"]
+    return remaining > 0, remaining
+
+def increment_daily_check(user_id):
+    today = time.strftime("%Y-%m-%d")
+    if user_id in daily_checks and daily_checks[user_id]["date"] == today:
+        daily_checks[user_id]["count"] += 1
+    else:
+        daily_checks[user_id] = {"date": today, "count": 1}
+
 # --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ, БОТ ЛИ ЭТО ---
 def is_bot_user(user):
     try:
@@ -98,20 +127,17 @@ def is_bot_user(user):
 def get_delay():
     return random.uniform(MIN_DELAY, MAX_DELAY)
 
-# --- ФУНКЦИЯ: ПОЛУЧЕНИЕ УЧАСТНИКОВ ЧАТА (ИСПРАВЛЕННАЯ) ---
+# --- ФУНКЦИЯ: ПОЛУЧЕНИЕ УЧАСТНИКОВ ЧАТА ---
 async def get_chat_participants(entity):
-    """Получает участников чата через iter_participants (без offset)"""
     global client
     
     users = []
-    
-    logger.info(f"🔍 Начинаю сбор участников чата...")
+    logger.info("🔍 Начинаю сбор участников чата...")
     
     try:
         async for user in client.iter_participants(entity):
             if user.username and not is_bot_user(user):
                 users.append(user)
-                # Показываем прогресс каждые 100 пользователей
                 if len(users) % 100 == 0:
                     logger.info(f"   Собрано {len(users)} пользователей...")
         
@@ -124,12 +150,59 @@ async def get_chat_participants(entity):
         await asyncio.sleep(wait + 1)
         return await get_chat_participants(entity)
     except Exception as e:
-        logger.error(f"❌ Ошибка сбора участников: {e}")
+        logger.warning(f"⚠️ Ошибка сбора участников: {e}")
         return []
+
+# --- ФУНКЦИЯ: ПОИСК ПОЛЬЗОВАТЕЛЕЙ ПО СООБЩЕНИЯМ ---
+async def get_users_from_messages(entity):
+    global client
+    
+    users = []
+    seen_ids = set()
+    logger.info("🔍 Ищу пользователей по сообщениям...")
+    
+    try:
+        async for message in client.iter_messages(entity, limit=500):
+            if not message.sender:
+                continue
+            
+            user = message.sender
+            user_id = user.id
+            
+            if user_id in seen_ids:
+                continue
+            if not user.username:
+                continue
+            if is_bot_user(user):
+                continue
+            
+            seen_ids.add(user_id)
+            users.append(user)
+            if len(users) >= MAX_USERS_TO_CHECK:
+                break
+        
+        logger.info(f"✅ Найдено {len(users)} пользователей по сообщениям")
+        return users
+        
+    except FloodWaitError as e:
+        wait = e.seconds
+        logger.warning(f"⏳ FloodWait при поиске: {wait} сек")
+        await asyncio.sleep(wait + 1)
+        return await get_users_from_messages(entity)
+    except Exception as e:
+        logger.error(f"❌ Ошибка поиска по сообщениям: {e}")
+        return []
+
+# --- ФУНКЦИЯ: ПОЛУЧЕНИЕ ПОЛЬЗОВАТЕЛЕЙ (С ЗАПАСНЫМ ВАРИАНТОМ) ---
+async def get_users_safe(entity):
+    users = await get_chat_participants(entity)
+    if users:
+        return users
+    logger.info("🔄 Участники не найдены, пробую через сообщения...")
+    return await get_users_from_messages(entity)
 
 # --- ФУНКЦИЯ: ПРОВЕРКА ПОДАРКОВ ---
 async def check_user_gifts(username):
-    """Проверяет неулучшенные подарки у пользователя"""
     global client
     
     try:
@@ -163,7 +236,6 @@ async def check_user_gifts(username):
         except Exception as e:
             return None, f"Ошибка API"
         
-        # Считаем неулучшенные подарки
         count = 0
         if result and result.gifts:
             for gift_obj in result.gifts:
@@ -180,7 +252,6 @@ async def check_user_gifts(username):
 
 # --- ФУНКЦИЯ: МАССОВАЯ ПРОВЕРКА ---
 async def check_users_batch(users, chat_id, user_id):
-    """Проверяет список пользователей с защитой от флуда"""
     global scanning_users
     
     total_users = len(users)
@@ -239,7 +310,6 @@ async def check_users_batch(users, chat_id, user_id):
 
 # --- ОСНОВНАЯ ФУНКЦИЯ СКАНИРОВАНИЯ ---
 async def scan_chat(chat_link, chat_id, user_id):
-    """Основная функция: парсинг чата + проверка подарков"""
     global scanning_users
     
     try:
@@ -268,7 +338,7 @@ async def scan_chat(chat_link, chat_id, user_id):
         
         await client.send_message(chat_id, "👥 Получаю список участников...")
         
-        users = await get_chat_participants(entity)
+        users = await get_users_safe(entity)
         
         if not users:
             await client.send_message(chat_id, "❌ В чате нет пользователей с юзернеймами")
@@ -344,8 +414,8 @@ async def handler(event):
                 "Отправь ссылку на **ГРУППУ** или **КАНАЛ**:\n"
                 "`t.me/gift_chat`\n"
                 "`@gift_chat`\n\n"
-                "Бот соберет участников и проверит их подарки.\n\n"
-                "⚠️ Внимание: проверка может занять много времени для больших чатов!\n"
+                f"📊 Лимит: {MAX_DAILY_CHECKS} проверки в день\n"
+                f"👥 Максимум: {MAX_USERS_TO_CHECK} пользователей за раз\n\n"
                 "Команды:\n"
                 "`/stop` - остановить проверку"
             )
@@ -371,9 +441,27 @@ async def handler(event):
             )
             return
         
+        # --- ПРОВЕРКА ДНЕВНОГО ЛИМИТА ---
+        can_check, remaining = check_daily_limit(user_id)
+        if not can_check:
+            await client.send_message(
+                chat_id,
+                f"❌ Ты исчерпал лимит проверок на сегодня ({MAX_DAILY_CHECKS}).\n"
+                f"Попробуй завтра!"
+            )
+            return
+        
         if user_id in scanning_users and scanning_users[user_id].get("status") == "active":
             await client.send_message(chat_id, "⏳ Уже идет сканирование. Дождись завершения.")
             return
+        
+        # --- ЗАПУСКАЕМ СКАНИРОВАНИЕ ---
+        increment_daily_check(user_id)
+        await client.send_message(
+            chat_id,
+            f"✅ Проверка запущена!\n"
+            f"📊 Осталось проверок на сегодня: {remaining - 1}"
+        )
         
         scanning_users[user_id] = {"status": "active", "stopped": False}
         asyncio.create_task(scan_chat(chat_input, chat_id, user_id))
@@ -412,8 +500,8 @@ if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("🚀 ЗАПУСК ЮЗЕРБОТА ДЛЯ ПРОВЕРКИ ПОДАРКОВ")
     logger.info("=" * 60)
-    logger.info("📌 Отправь ссылку на чат/канал")
-    logger.info("📌 Бот найдет участников и проверит их подарки")
+    logger.info(f"📊 Лимит проверок в день: {MAX_DAILY_CHECKS}")
+    logger.info(f"👥 Максимум пользователей: {MAX_USERS_TO_CHECK}")
     logger.info("=" * 60)
     
     import threading
